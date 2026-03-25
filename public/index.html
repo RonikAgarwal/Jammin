@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Jammin — Listen to YouTube music together in real-time with friends. A shared vibe experience.">
+  <title>Jammin — Listen Together</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Animated Background -->
+  <div class="bg-gradient"></div>
+  <canvas id="particles-canvas"></canvas>
+
+  <!-- Landing View -->
+  <div id="landing-view" class="view active">
+    <div class="landing-container">
+      <div class="logo-section">
+        <h1 class="logo">
+          <span class="logo-icon">🎵</span>
+          <span class="logo-text">Jammin</span>
+        </h1>
+        <p class="tagline">listen together, vibe together</p>
+      </div>
+
+      <div class="landing-card glass-panel">
+        <div class="input-group">
+          <label for="username-input">Your Name</label>
+          <input type="text" id="username-input" placeholder="What should we call you?" maxlength="20" autocomplete="off">
+        </div>
+
+        <div class="landing-actions">
+          <button id="create-session-btn" class="btn btn-primary">
+            <span class="btn-icon">✦</span>
+            Start a Session
+          </button>
+
+          <div class="divider">
+            <span>or</span>
+          </div>
+
+          <div class="join-group">
+            <input type="text" id="session-code-input" placeholder="Enter session code" maxlength="6" autocomplete="off">
+            <button id="join-session-btn" class="btn btn-secondary">Join</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Session View -->
+  <div id="session-view" class="view">
+    <!-- Header -->
+    <header class="session-header">
+      <div class="header-left">
+        <span class="logo-small">🎵 Jammin</span>
+      </div>
+      <div class="header-center">
+        <div class="session-code-display glass-pill" id="session-code-display" title="Click to copy">
+          <span class="code-label">Session</span>
+          <span class="code-value" id="session-code-value">------</span>
+          <span class="copy-icon">📋</span>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="connection-status" id="connection-status">
+          <span class="status-dot"></span>
+          <span class="status-text">Connected</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="session-main">
+      <!-- Player Section -->
+      <div class="player-section">
+        <div class="player-wrapper glass-panel">
+          <div id="player-container">
+            <div id="youtube-player"></div>
+            <div id="player-overlay" class="player-overlay"></div>
+            <div id="player-placeholder" class="player-placeholder">
+              <div class="placeholder-content">
+                <span class="placeholder-icon">🎵</span>
+                <p>Add a song to start the vibe</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Now Playing -->
+        <div class="now-playing" id="now-playing">
+          <div class="now-playing-info">
+            <div class="playing-indicator">
+              <span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span>
+            </div>
+            <span class="now-playing-title" id="now-playing-title">Nothing playing</span>
+          </div>
+          <div class="player-controls">
+            <button class="control-btn" id="prev-btn" title="Previous" disabled>⏮</button>
+            <button class="control-btn control-play" id="play-pause-btn" title="Play/Pause">▶</button>
+            <button class="control-btn" id="next-btn" title="Skip">⏭</button>
+          </div>
+        </div>
+
+        <!-- Add Song Bar -->
+        <div class="add-song-bar glass-panel">
+          <input type="text" id="song-url-input" placeholder="Paste a YouTube link to add to the queue..." autocomplete="off">
+          <div class="add-song-actions">
+            <button id="add-queue-btn" class="btn btn-ghost" title="Add to Queue">
+              <span>+ Queue</span>
+            </button>
+            <button id="play-next-btn" class="btn btn-accent" title="Play Next">
+              <span>▶ Next</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Side Panel -->
+      <aside class="side-panel">
+        <!-- Tabs -->
+        <div class="panel-tabs">
+          <button class="panel-tab active" data-tab="queue">Queue</button>
+          <button class="panel-tab" data-tab="participants">Vibers</button>
+        </div>
+
+        <!-- Queue Panel -->
+        <div class="panel-content" id="queue-panel">
+          <div class="queue-list" id="queue-list">
+            <div class="queue-empty" id="queue-empty">
+              <span class="empty-icon">🎶</span>
+              <p>Queue is empty</p>
+              <p class="empty-hint">Paste a YouTube link to get started</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Participants Panel -->
+        <div class="panel-content hidden" id="participants-panel">
+          <div class="participants-list" id="participants-list"></div>
+          <div class="vibe-controller" id="vibe-controller">
+            <span id="controller-text">No one is controlling the vibe</span>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <!-- Notification Area -->
+    <div class="notification-area" id="notification-area"></div>
+
+    <!-- Go Live / Reconnect Bar -->
+    <div class="sync-bar hidden" id="sync-bar">
+      <span class="sync-message" id="sync-message"></span>
+      <button class="btn btn-live" id="go-live-btn">Go Live</button>
+    </div>
+  </div>
+
+  <!-- YouTube IFrame API -->
+  <script src="https://www.youtube.com/iframe_api"></script>
+
+  <!-- App Scripts -->
+  <script src="notifications.js"></script>
+  <script src="participants.js"></script>
+  <script src="player.js"></script>
+  <script src="queue-ui.js"></script>
+  <script src="sync-client.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
