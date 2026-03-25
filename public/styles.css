@@ -659,6 +659,65 @@ input[type="text"]::placeholder {
   50% { box-shadow: 0 0 20px var(--glow-pink); }
 }
 
+.custom-seek-container {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 16px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  font-family: monospace;
+}
+
+.custom-seek-bar {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 200px;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+
+.custom-seek-bar:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.custom-seek-bar::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text-primary);
+  cursor: pointer;
+  box-shadow: 0 0 8px var(--glow-pink);
+  transition: transform 0.1s;
+}
+
+.custom-seek-bar:not(:disabled)::-webkit-slider-thumb:hover {
+  transform: scale(1.3);
+  background: var(--accent-pink);
+}
+
+.custom-seek-bar::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text-primary);
+  cursor: pointer;
+  box-shadow: 0 0 8px var(--glow-pink);
+  border: none;
+  transition: transform 0.1s;
+}
+
+.custom-seek-bar:not(:disabled)::-moz-range-thumb:hover {
+  transform: scale(1.3);
+  background: var(--accent-pink);
+}
+
 /* ---- Add Song Bar ---- */
 .add-song-bar {
   display: flex;

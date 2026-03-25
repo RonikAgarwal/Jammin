@@ -99,6 +99,11 @@
             <span class="now-playing-title" id="now-playing-title">Nothing playing</span>
           </div>
           <div class="player-controls">
+            <div class="custom-seek-container" id="custom-seek-container">
+              <span id="seek-current">0:00</span>
+              <input type="range" id="seek-bar" class="custom-seek-bar" min="0" max="100" value="0" step="0.1" disabled>
+              <span id="seek-total">0:00</span>
+            </div>
             <button class="control-btn" id="prev-btn" title="Previous" disabled>⏮</button>
             <button class="control-btn control-play" id="play-pause-btn" title="Play/Pause">▶</button>
             <button class="control-btn" id="next-btn" title="Skip">⏭</button>

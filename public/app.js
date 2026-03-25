@@ -5,7 +5,14 @@ const App = (() => {
   let userId = null;
   let sessionCode = null;
   let isHost = false;
-  let username = 'Anonymous'; // Changed from '' to 'Anonymous' as per instruction snippet
+  let username = 'Anonymous';
+
+  // Seek bar variables
+  let seekBarEl = null;
+  let seekCurrentEl = null;
+  let seekTotalEl = null;
+  let isDraggingSeek = false;
+  let seekUpdateInterval = null;
 
   // ---- Init ----
 
@@ -55,6 +62,31 @@ const App = (() => {
   }
 
   // ---- Utilities ----
+
+  function startSeekUpdates() {
+    if (seekUpdateInterval) return;
+    seekUpdateInterval = setInterval(() => {
+      if (isDraggingSeek || !seekBarEl) return;
+      
+      const currentTime = Player.getCurrentTime();
+      const duration = Player.getDuration();
+      
+      if (duration > 0) {
+        seekBarEl.max = duration;
+        seekBarEl.value = currentTime;
+        if (seekCurrentEl) seekCurrentEl.textContent = formatTime(currentTime);
+        if (seekTotalEl) seekTotalEl.textContent = formatTime(duration);
+      }
+    }, 500);
+  }
+
+  function formatTime(seconds) {
+    if (!seconds || isNaN(seconds)) return '0:00';
+    const s = Math.floor(seconds);
+    const m = Math.floor(s / 60);
+    const remS = s % 60;
+    return `${m}:${remS.toString().padStart(2, '0')}`;
+  }
 
   // ---- WebSocket Connection ----
 
@@ -235,6 +267,8 @@ const App = (() => {
     // Enable host controls
     const skipBtn = document.getElementById('next-btn');
     if (skipBtn) skipBtn.disabled = false; // Never physically disable so we can show toast
+
+    if (seekBarEl) seekBarEl.disabled = !isHost;
   }
 
   // ---- Landing Events ----
@@ -288,6 +322,31 @@ const App = (() => {
   // ---- Session Events ----
 
   function bindSessionEvents() {
+    seekBarEl = document.getElementById('seek-bar');
+    seekCurrentEl = document.getElementById('seek-current');
+    seekTotalEl = document.getElementById('seek-total');
+
+    if (seekBarEl) {
+      seekBarEl.addEventListener('input', () => {
+        isDraggingSeek = true;
+        const val = parseFloat(seekBarEl.value);
+        if (seekCurrentEl) seekCurrentEl.textContent = formatTime(val);
+      });
+
+      seekBarEl.addEventListener('change', () => {
+        if (!isHost) {
+          isDraggingSeek = false;
+          return;
+        }
+        const val = parseFloat(seekBarEl.value);
+        Player.seekTo(val);
+        // Player's internal seek detector will catch this and send SEEK automatically
+        isDraggingSeek = false;
+      });
+    }
+
+    startSeekUpdates();
+
     // Copy session code
     const codeDisplay = document.getElementById('session-code-display');
     codeDisplay.addEventListener('click', () => {
