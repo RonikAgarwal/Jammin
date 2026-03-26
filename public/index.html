@@ -169,6 +169,20 @@
     </div>
   </div>
 
+  <div class="control-transfer-modal hidden" id="control-transfer-modal">
+    <div class="control-transfer-card glass-panel" role="dialog" aria-modal="true" aria-labelledby="control-transfer-title">
+      <div class="control-transfer-kicker">Pass Controls</div>
+      <h3 class="control-transfer-title" id="control-transfer-title">Pass controls?</h3>
+      <p class="control-transfer-body" id="control-transfer-body">
+        The next controller will take over playback and queue priority actions for the room.
+      </p>
+      <div class="control-transfer-actions">
+        <button class="btn btn-ghost" id="control-transfer-cancel" type="button">Keep controls</button>
+        <button class="btn btn-accent" id="control-transfer-confirm" type="button">Pass controls</button>
+      </div>
+    </div>
+  </div>
+
   <!-- YouTube IFrame API -->
   <script src="https://www.youtube.com/iframe_api"></script>
 

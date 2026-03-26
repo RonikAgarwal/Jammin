@@ -315,9 +315,15 @@ const QueueUI = (() => {
   function updateTransportControls() {
     const prevBtn = document.getElementById('prev-btn');
     const nextBtn = document.getElementById('next-btn');
+    const isHost = Boolean(window.App && window.App.getIsHost());
 
-    if (prevBtn) prevBtn.disabled = state.history.length === 0;
-    if (nextBtn) nextBtn.disabled = !state.current && state.upcoming.length === 0;
+    if (prevBtn) prevBtn.disabled = !isHost || state.history.length === 0;
+    if (nextBtn) nextBtn.disabled = !isHost || (!state.current && state.upcoming.length === 0);
+  }
+
+  function refreshPermissions() {
+    render();
+    updateTransportControls();
   }
 
   function formatMeta(item) {
@@ -345,5 +351,5 @@ const QueueUI = (() => {
     return div.innerHTML;
   }
 
-  return { init, update };
+  return { init, update, refreshPermissions };
 })();

@@ -15,6 +15,7 @@ const {
   getSessionByWs,
   broadcast,
   getParticipantList,
+  transferHost,
 } = require('./session');
 
 const {
@@ -172,6 +173,13 @@ wss.on('connection', (ws) => {
         type: 'USER_LEFT',
         userId: result.leftUserId,
       });
+      if (result.controlTransfer) {
+        broadcast(result.session, {
+          type: 'CONTROL_TRANSFERRED',
+          ...result.controlTransfer,
+          reason: 'controller_left',
+        });
+      }
     }
   });
 });
@@ -208,6 +216,8 @@ function handleMessage(ws, msg) {
       return handlePlaySelected(ws, msg);
     case 'REQUEUE_HISTORY_ITEM':
       return handleRequeueHistoryItem(ws, msg);
+    case 'TRANSFER_HOST':
+      return handleTransferHostMsg(ws, msg);
     case 'TIME_REPORT':
       return handleTimeReportMsg(ws, msg);
     case 'PLAYER_READY':
@@ -313,7 +323,7 @@ async function handleAddToQueue(ws, msg) {
 async function handlePlayNext(ws, msg) {
   const session = getSessionByWs(ws);
   if (!session) return send(ws, { type: 'ERROR', message: 'Not in a session' });
-  if (session.host !== ws._jammin.userId) return send(ws, { type: 'ERROR', message: 'Only the host can play next' });
+  if (session.host !== ws._jammin.userId) return send(ws, { type: 'ERROR', message: 'Only the controller can play next' });
 
   const videoId = parseYouTubeUrl(msg.videoUrl || '');
   if (!videoId) return send(ws, { type: 'ERROR', message: 'Invalid YouTube URL' });
@@ -359,6 +369,35 @@ function handleRequeueHistoryItem(ws, msg) {
   const session = getSessionByWs(ws);
   if (!session || !ws._jammin || session.host !== ws._jammin.userId) return;
   requeueHistoryItem(session, msg.itemId, msg.toIndex);
+}
+
+function handleTransferHostMsg(ws, msg) {
+  const session = getSessionByWs(ws);
+  if (!session || !ws._jammin) return;
+  if (session.host !== ws._jammin.userId) {
+    return send(ws, { type: 'ERROR', message: 'Only the controller can pass controls' });
+  }
+
+  const targetUserId = String(msg.targetUserId || '').trim();
+  if (!targetUserId || targetUserId === session.host) {
+    return send(ws, { type: 'ERROR', message: 'Choose someone else to pass controls to' });
+  }
+
+  const transfer = transferHost(session, targetUserId);
+  if (!transfer) {
+    return send(ws, { type: 'ERROR', message: 'That viber is no longer in the room' });
+  }
+
+  broadcast(session, {
+    type: 'PARTICIPANT_UPDATE',
+    participants: getParticipantList(session),
+  });
+
+  broadcast(session, {
+    type: 'CONTROL_TRANSFERRED',
+    ...transfer,
+    reason: 'manual',
+  });
 }
 
 function handleTimeReportMsg(ws, msg) {

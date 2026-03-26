@@ -15,27 +15,40 @@ const Participants = (() => {
   let listEl = null;
   let controllerEl = null;
   let currentParticipants = [];
+  let currentOptions = {
+    currentUserId: null,
+    canPassControls: false,
+  };
 
   function init() {
     listEl = document.getElementById('participants-list');
     controllerEl = document.getElementById('controller-text');
   }
 
-  function update(participants, hostId) {
+  function update(participants, options = {}) {
     if (!listEl) init();
-    currentParticipants = participants;
+    currentParticipants = Array.isArray(participants) ? participants : [];
+    currentOptions = {
+      currentUserId: options.currentUserId || null,
+      canPassControls: Boolean(options.canPassControls),
+    };
 
     listEl.innerHTML = '';
 
-    participants.forEach((p, index) => {
+    const displayParticipants = currentParticipants
+      .slice()
+      .sort((a, b) => Number(Boolean(b.isHost)) - Number(Boolean(a.isHost)));
+
+    displayParticipants.forEach((p, index) => {
       const item = document.createElement('div');
-      item.className = 'participant-item';
+      const isController = Boolean(p.isHost);
+      const isSelf = p.userId === currentOptions.currentUserId;
+      item.className = `participant-item${isController ? ' participant-item-controller' : ''}`;
 
       const initial = (p.username || '?').charAt(0).toUpperCase();
       const colorIndex = index % AVATAR_COLORS.length;
 
       const statusText = getStatusText(p.status);
-      const isHost = p.isHost || p.userId === hostId;
 
       item.innerHTML = `
         <div class="participant-avatar" style="background: ${AVATAR_COLORS[colorIndex]}">
@@ -43,19 +56,38 @@ const Participants = (() => {
           <div class="status-ring ${p.status || 'in-sync'}"></div>
         </div>
         <div class="participant-info">
-          <div class="participant-name">${escapeHtml(p.username || 'Anonymous')}</div>
+          <div class="participant-name-row">
+            <div class="participant-name">${escapeHtml(p.username || 'Anonymous')}</div>
+            ${isSelf ? '<span class="participant-you">You</span>' : ''}
+          </div>
           <div class="participant-status">${statusText}</div>
         </div>
-        ${isHost ? '<span class="participant-badge">Host</span>' : ''}
+        <div class="participant-actions">
+          ${isController ? '<span class="participant-badge">Controller</span>' : ''}
+          ${currentOptions.canPassControls && !isController ? '<button class="participant-pass-btn" type="button">Pass controls</button>' : ''}
+        </div>
       `;
+
+      const passBtn = item.querySelector('.participant-pass-btn');
+      if (passBtn) {
+        passBtn.addEventListener('click', () => {
+          if (window.App && typeof window.App.openTransferControls === 'function') {
+            window.App.openTransferControls(p.userId, p.username || 'Anonymous');
+          }
+        });
+      }
 
       listEl.appendChild(item);
     });
 
     // Update vibe controller text
-    const host = participants.find(p => p.isHost || p.userId === hostId);
-    if (host && controllerEl) {
-      controllerEl.textContent = `${host.username} is controlling the vibe`;
+    const controller = currentParticipants.find((participant) => participant.isHost);
+    if (controller && controllerEl) {
+      controllerEl.textContent = controller.userId === currentOptions.currentUserId
+        ? 'You are controlling the vibe right now'
+        : `${controller.username} is controlling the vibe right now`;
+    } else if (controllerEl) {
+      controllerEl.textContent = 'No one is controlling the vibe';
     }
   }
 
@@ -71,7 +103,7 @@ const Participants = (() => {
 
   function escapeHtml(str) {
     const div = document.createElement('div');
-    div.textContent = str;
+    div.textContent = str || '';
     return div.innerHTML;
   }
 

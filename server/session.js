@@ -60,16 +60,20 @@ function leaveSession(ws) {
   const { sessionCode, userId } = ws._jammin;
   const session = sessions.get(sessionCode);
   if (!session) return null;
+  const leavingParticipant = session.participants.get(userId);
+  const leavingUsername = leavingParticipant ? leavingParticipant.username : null;
 
   session.participants.delete(userId);
   session.readyUsers.delete(userId);
 
   // Transfer host if host left
+  let controlTransfer = null;
   if (session.host === userId && session.participants.size > 0) {
     const nextHost = session.participants.keys().next().value;
-    session.host = nextHost;
-    const hostParticipant = session.participants.get(nextHost);
-    if (hostParticipant) hostParticipant.isHost = true;
+    controlTransfer = transferHost(session, nextHost, userId);
+    if (controlTransfer) {
+      controlTransfer.fromUsername = leavingUsername || 'Someone';
+    }
   }
 
   // Destroy session if empty
@@ -79,7 +83,7 @@ function leaveSession(ws) {
     return { destroyed: true, sessionCode };
   }
 
-  return { destroyed: false, session, sessionCode, leftUserId: userId };
+  return { destroyed: false, session, sessionCode, leftUserId: userId, controlTransfer };
 }
 
 function getSession(code) {
@@ -128,6 +132,25 @@ function getParticipantList(session) {
   return list;
 }
 
+function transferHost(session, nextHostUserId, previousHostId = session.host) {
+  const nextHostParticipant = session.participants.get(nextHostUserId);
+  if (!nextHostParticipant) return null;
+  const previousHostParticipant = previousHostId ? session.participants.get(previousHostId) : null;
+
+  session.participants.forEach((participant, participantId) => {
+    participant.isHost = participantId === nextHostUserId;
+  });
+
+  session.host = nextHostUserId;
+
+  return {
+    fromUserId: previousHostId,
+    fromUsername: previousHostParticipant ? previousHostParticipant.username : null,
+    toUserId: nextHostUserId,
+    toUsername: nextHostParticipant.username,
+  };
+}
+
 // Helpers
 
 function generateUserId() {
@@ -156,4 +179,5 @@ module.exports = {
   broadcast,
   sendTo,
   getParticipantList,
+  transferHost,
 };

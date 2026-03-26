@@ -23,6 +23,7 @@ const App = (() => {
   let searchHasMore = false;
   let searchIsLoading = false;
   let selectedSearchResult = null;
+  let pendingControlTransfer = null;
 
   // ---- Init ----
 
@@ -109,6 +110,44 @@ const App = (() => {
     const playNextBtn = document.getElementById('play-next-btn');
     if (addBtn) addBtn.disabled = !selectedSearchResult;
     if (playNextBtn) playNextBtn.disabled = !selectedSearchResult || !isHost;
+  }
+
+  function refreshControllerAccess() {
+    if (seekBarEl) seekBarEl.disabled = !isHost;
+
+    const playPauseBtn = document.getElementById('play-pause-btn');
+    if (playPauseBtn) playPauseBtn.disabled = !isHost;
+
+    const overlayEl = document.getElementById('player-overlay');
+    if (overlayEl) {
+      overlayEl.classList.toggle('viewer-locked', !isHost);
+    }
+
+    updateSearchActionButtons();
+    if (typeof QueueUI !== 'undefined' && typeof QueueUI.refreshPermissions === 'function') {
+      QueueUI.refreshPermissions();
+    }
+  }
+
+  function syncParticipantsState(participants) {
+    if (!Array.isArray(participants)) return;
+
+    const self = userId
+      ? participants.find((participant) => participant.userId === userId)
+      : null;
+
+    isHost = Boolean(self && self.isHost);
+    SyncClient.setHost(isHost);
+    refreshControllerAccess();
+
+    Participants.update(participants, {
+      currentUserId: userId,
+      canPassControls: isHost,
+    });
+
+    if (!isHost) {
+      closeTransferControls();
+    }
   }
 
   function resetSearchSelection({ preserveQuery = false } = {}) {
@@ -247,7 +286,7 @@ const App = (() => {
   function queueSelectedSearchResult(type) {
     if (!selectedSearchResult) return;
     if (type === 'PLAY_NEXT' && !isHost) {
-      Notifications.info('Only the host can Play Next');
+      Notifications.info('Only the controller can Play Next');
       return;
     }
 
@@ -261,6 +300,63 @@ const App = (() => {
         ? 'Added to Play Next. Search results are still here for your next pick.'
         : 'Added to queue. Search results are still here for your next pick.'
     );
+  }
+
+  function openTransferControls(targetUserId, targetUsername) {
+    if (!isHost || !targetUserId || targetUserId === userId) return;
+
+    pendingControlTransfer = {
+      userId: targetUserId,
+      username: targetUsername || 'this viber',
+    };
+
+    const modal = document.getElementById('control-transfer-modal');
+    const title = document.getElementById('control-transfer-title');
+    const body = document.getElementById('control-transfer-body');
+    const confirmBtn = document.getElementById('control-transfer-confirm');
+
+    if (title) title.textContent = `Pass controls to ${pendingControlTransfer.username}?`;
+    if (body) {
+      body.textContent = `${pendingControlTransfer.username} will control play, pause, seek, skip, and Play Next until they pass it on again.`;
+    }
+    if (confirmBtn) confirmBtn.textContent = `Pass to ${pendingControlTransfer.username}`;
+    if (modal) modal.classList.remove('hidden');
+  }
+
+  function closeTransferControls() {
+    pendingControlTransfer = null;
+    const modal = document.getElementById('control-transfer-modal');
+    if (modal) modal.classList.add('hidden');
+  }
+
+  function confirmTransferControls() {
+    if (!pendingControlTransfer) return;
+
+    send({
+      type: 'TRANSFER_HOST',
+      targetUserId: pendingControlTransfer.userId,
+    });
+
+    Notifications.info(`Passing controls to ${pendingControlTransfer.username}...`, 1800);
+    closeTransferControls();
+  }
+
+  function handleControlTransferred(msg) {
+    if (msg.toUserId === userId) {
+      Notifications.success(
+        msg.reason === 'controller_left'
+          ? 'You picked up the controls'
+          : 'You have the controls now'
+      );
+      return;
+    }
+
+    if (msg.fromUserId === userId) {
+      Notifications.info(`You passed controls to ${msg.toUsername || 'someone'}`);
+      return;
+    }
+
+    Notifications.info(`${msg.toUsername || 'Someone'} is controlling the vibe now`);
   }
 
   // ---- WebSocket Connection ----
@@ -363,7 +459,10 @@ const App = (() => {
         QueueUI.update(msg.queue);
         break;
       case 'PARTICIPANT_UPDATE':
-        Participants.update(msg.participants);
+        syncParticipantsState(msg.participants);
+        break;
+      case 'CONTROL_TRANSFERRED':
+        handleControlTransferred(msg);
         break;
       case 'USER_JOINED':
         Notifications.info(`${msg.username} joined the session`);
@@ -400,31 +499,27 @@ const App = (() => {
   function handleSessionCreated(msg) {
     userId = msg.userId;
     sessionCode = msg.code;
-    isHost = true;
     username = msg.username;
-    SyncClient.setHost(true);
 
     switchToSessionView(msg.code, msg.username);
-    Participants.update(msg.participants, userId);
+    syncParticipantsState(msg.participants || []);
     Notifications.success('Session created — share the code!');
   }
 
   function handleSessionJoined(msg) {
     userId = msg.userId;
     sessionCode = msg.code;
-    isHost = msg.isHost || false;
     username = msg.username;
-    SyncClient.setHost(isHost);
 
     switchToSessionView(msg.code, msg.username);
-    Participants.update(msg.participants, userId);
+    syncParticipantsState(msg.participants || []);
     Notifications.success('Joined live session');
   }
 
   function handleSessionState(msg) {
     // Full state from server on join
     if (msg.queue) QueueUI.update(msg.queue);
-    if (msg.participants) Participants.update(msg.participants);
+    if (msg.participants) syncParticipantsState(msg.participants);
 
     // If there's a current video, sync to it
     if (msg.currentVideo && msg.playbackState !== 'idle') {
@@ -460,12 +555,7 @@ const App = (() => {
       logoEl.innerHTML = `🎵 Jammin <span style="opacity:0.5; font-size: 0.8em; margin-left: 8px;">| ${displayUsername}</span>`;
     }
 
-    // Enable host controls
-    const skipBtn = document.getElementById('next-btn');
-    if (skipBtn) skipBtn.disabled = false; // Never physically disable so we can show toast
-
-    if (seekBarEl) seekBarEl.disabled = !isHost;
-    updateSearchActionButtons();
+    refreshControllerAccess();
   }
 
   // ---- Landing Events ----
@@ -533,6 +623,7 @@ const App = (() => {
       seekBarEl.addEventListener('change', () => {
         if (!isHost) {
           isDraggingSeek = false;
+          Notifications.info('Only the controller can scrub the track');
           return;
         }
         const val = parseFloat(seekBarEl.value);
@@ -560,8 +651,11 @@ const App = (() => {
     const playNextBtn = document.getElementById('play-next-btn');
     const searchInput = document.getElementById('song-search-input');
     const searchResults = document.getElementById('song-search-results');
+    const transferModal = document.getElementById('control-transfer-modal');
+    const transferCancelBtn = document.getElementById('control-transfer-cancel');
+    const transferConfirmBtn = document.getElementById('control-transfer-confirm');
 
-    updateSearchActionButtons();
+    refreshControllerAccess();
 
     addBtn.addEventListener('click', () => {
       queueSelectedSearchResult('ADD_TO_QUEUE');
@@ -569,6 +663,28 @@ const App = (() => {
 
     playNextBtn.addEventListener('click', () => {
       queueSelectedSearchResult('PLAY_NEXT');
+    });
+
+    if (transferCancelBtn) {
+      transferCancelBtn.addEventListener('click', closeTransferControls);
+    }
+
+    if (transferConfirmBtn) {
+      transferConfirmBtn.addEventListener('click', confirmTransferControls);
+    }
+
+    if (transferModal) {
+      transferModal.addEventListener('click', (e) => {
+        if (e.target === transferModal) {
+          closeTransferControls();
+        }
+      });
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        closeTransferControls();
+      }
     });
 
     if (searchInput) {
@@ -603,7 +719,7 @@ const App = (() => {
     const playPauseBtn = document.getElementById('play-pause-btn');
     playPauseBtn.addEventListener('click', () => {
       if (!isHost) {
-        Notifications.info('Only the host can control playback');
+        Notifications.info('Only the controller can control playback');
         return;
       }
       const state = Player.getState();
@@ -621,7 +737,7 @@ const App = (() => {
     const skipBtn = document.getElementById('next-btn');
     skipBtn.addEventListener('click', () => {
       if (!isHost) {
-        Notifications.info('Only the host can control playback');
+        Notifications.info('Only the controller can control playback');
         return;
       }
       send({ type: 'SKIP_TRACK' });
@@ -632,7 +748,7 @@ const App = (() => {
     if (prevBtn) {
       prevBtn.addEventListener('click', () => {
         if (!isHost) {
-          Notifications.info('Only the host can control playback');
+          Notifications.info('Only the controller can control playback');
           return;
         }
         send({ type: 'PREV_TRACK' });
@@ -645,7 +761,7 @@ const App = (() => {
     if (playerOverlay) {
       playerOverlay.addEventListener('click', () => {
         if (!isHost) {
-          Notifications.info('Only the host can control playback');
+          Notifications.info('Only the controller can control playback');
           return;
         }
         const state = Player.getState();
@@ -776,5 +892,12 @@ const App = (() => {
     init();
   });
 
-  return { send, init, getIsHost: () => isHost };
+  return {
+    send,
+    init,
+    getIsHost: () => isHost,
+    openTransferControls,
+  };
 })();
+
+window.App = App;
