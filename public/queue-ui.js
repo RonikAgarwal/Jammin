@@ -88,6 +88,7 @@ const QueueUI = (() => {
   function createCurrentRow(item) {
     const el = document.createElement('div');
     el.className = 'queue-row queue-row-current';
+    el.dataset.dropType = 'current';
 
     el.innerHTML = `
       <div class="queue-row-marker">
@@ -102,14 +103,13 @@ const QueueUI = (() => {
         <div class="queue-row-meta">${escapeHtml(formatMeta(item))}</div>
       </div>
     `;
-
-    bindDropTarget(el, { type: 'current' });
     return el;
   }
 
   function createPlayedRow(item) {
     const el = document.createElement('div');
     el.className = 'queue-row queue-row-played';
+    el.dataset.dropType = 'current';
 
     const isHost = window.App && window.App.getIsHost();
 
@@ -136,6 +136,8 @@ const QueueUI = (() => {
   function createUpcomingRow(item, index) {
     const el = document.createElement('div');
     el.className = 'queue-row queue-row-upnext';
+    el.dataset.dropType = 'upcoming';
+    el.dataset.dropIndex = String(index);
 
     const isHost = window.App && window.App.getIsHost();
 
@@ -162,7 +164,6 @@ const QueueUI = (() => {
       isHost,
     });
     bindUpcomingRow(el, item, index, isHost);
-    bindDropTarget(el, { type: 'upcoming', index });
     return el;
   }
 
@@ -194,54 +195,60 @@ const QueueUI = (() => {
 
     const handle = el.querySelector('.queue-drag-handle');
     if (!handle) return;
-    handle.draggable = true;
+    handle.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
 
-    handle.addEventListener('dragstart', (e) => {
       dragState = {
         kind: config.kind,
         itemId: config.itemId,
         index: config.index,
+        sourceEl: el,
+        handleEl: handle,
+        startX: e.clientX,
+        startY: e.clientY,
+        targetEl: null,
       };
 
       el.classList.add('dragging');
-      e.dataTransfer.effectAllowed = 'move';
-      e.dataTransfer.setData('text/plain', config.itemId || '');
-      if (e.dataTransfer.setDragImage) {
-        e.dataTransfer.setDragImage(el, 24, 24);
-      }
-    });
-
-    handle.addEventListener('dragend', () => {
-      el.classList.remove('dragging');
-      dragState = null;
-      clearDropTargets();
+      handle.classList.add('active');
+      document.body.classList.add('queue-dragging-active');
+      window.addEventListener('pointermove', handlePointerMove);
+      window.addEventListener('pointerup', handlePointerUp, { once: true });
+      window.addEventListener('pointercancel', handlePointerCancel, { once: true });
     });
   }
 
-  function bindDropTarget(el, target) {
-    el.addEventListener('dragover', (e) => {
-      if (!dragState) return;
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      el.classList.add('queue-drop-target');
-    });
+  function handlePointerMove(e) {
+    if (!dragState) return;
 
-    el.addEventListener('dragleave', () => {
-      el.classList.remove('queue-drop-target');
-    });
+    const deltaY = e.clientY - dragState.startY;
+    dragState.sourceEl.style.transform = `translateY(${deltaY * 0.35}px) scale(1.01)`;
 
-    el.addEventListener('drop', (e) => {
-      if (!dragState) return;
-      e.preventDefault();
-      el.classList.remove('queue-drop-target');
-      applyDrop(target);
-    });
+    const row = document.elementFromPoint(e.clientX, e.clientY)?.closest('.queue-row');
+    setDropTarget(row && row !== dragState.sourceEl ? row : null);
   }
 
-  function applyDrop(target) {
+  function handlePointerUp() {
+    if (!dragState) return;
+
+    if (dragState.targetEl) {
+      applyDrop(dragState.targetEl);
+    }
+
+    finishDrag();
+  }
+
+  function handlePointerCancel() {
+    finishDrag();
+  }
+
+  function applyDrop(targetEl) {
     if (!dragState || !window.App) return;
 
-    const toIndex = target.type === 'current' ? 0 : target.index;
+    const dropType = targetEl?.dataset.dropType;
+    const dropIndex = targetEl?.dataset.dropIndex;
+    const toIndex = dropType === 'current' ? 0 : Number(dropIndex);
 
     if (dragState.kind === 'upcoming') {
       if (typeof dragState.index !== 'number' || typeof toIndex !== 'number') return;
@@ -269,6 +276,30 @@ const QueueUI = (() => {
     listEl.querySelectorAll('.queue-drop-target').forEach((node) => {
       node.classList.remove('queue-drop-target');
     });
+  }
+
+  function setDropTarget(targetEl) {
+    if (!dragState) return;
+    if (dragState.targetEl === targetEl) return;
+
+    clearDropTargets();
+    dragState.targetEl = targetEl;
+    if (targetEl) {
+      targetEl.classList.add('queue-drop-target');
+    }
+  }
+
+  function finishDrag() {
+    if (!dragState) return;
+
+    dragState.sourceEl.classList.remove('dragging');
+    dragState.sourceEl.style.transform = '';
+    dragState.handleEl.classList.remove('active');
+    dragState = null;
+    clearDropTargets();
+    document.body.classList.remove('queue-dragging-active');
+    window.removeEventListener('pointermove', handlePointerMove);
+    window.removeEventListener('pointercancel', handlePointerCancel);
   }
 
   function createHelperCard(title, body) {

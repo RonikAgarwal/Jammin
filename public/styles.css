@@ -877,6 +877,11 @@ input[type="text"]::placeholder {
   border-color: var(--accent-purple);
 }
 
+.queue-row.dragging {
+  z-index: 2;
+  box-shadow: 0 16px 30px rgba(0, 0, 0, 0.24);
+}
+
 .queue-row-marker {
   width: 22px;
   flex-shrink: 0;
@@ -936,6 +941,10 @@ input[type="text"]::placeholder {
 }
 
 .queue-drag-handle:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+
+.queue-drag-handle.active {
   color: var(--text-primary);
 }
 
@@ -1034,6 +1043,11 @@ input[type="text"]::placeholder {
 .queue-drop-target {
   border-color: rgba(34, 211, 238, 0.5);
   box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.22) inset;
+}
+
+body.queue-dragging-active,
+body.queue-dragging-active * {
+  cursor: grabbing !important;
 }
 
 .queue-row-btn {
