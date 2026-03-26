@@ -30,9 +30,30 @@ const App = (() => {
   let roomReferenceStartedAt = null;
   let playbackUnlockTimer = null;
   let hasPlaybackUnlock = false;
+  let themeRequestToken = 0;
+  let activeThemeKey = 'default';
+  const themeCache = new Map();
   const SEARCH_DEBOUNCE_MS = 550;
   const MIN_SEARCH_CHARS = 3;
   const searchCache = new Map();
+  const DEFAULT_THEME_VARS = {
+    '--bg-deep': '#0b0f17',
+    '--bg-mid': '#151b29',
+    '--bg-surface': 'rgba(16, 22, 35, 0.68)',
+    '--accent-pink': '#e6a06f',
+    '--accent-cyan': '#8ec5ff',
+    '--accent-purple': '#7c8cff',
+    '--accent-violet': '#5363c7',
+    '--glow-pink': 'rgba(230, 160, 111, 0.32)',
+    '--glow-cyan': 'rgba(142, 197, 255, 0.28)',
+    '--glow-purple': 'rgba(124, 140, 255, 0.26)',
+    '--theme-wash-1': 'rgba(126, 90, 255, 0.12)',
+    '--theme-wash-2': 'rgba(224, 141, 92, 0.08)',
+    '--theme-wash-3': 'rgba(97, 153, 255, 0.08)',
+    '--glass-bg': 'rgba(255, 255, 255, 0.04)',
+    '--glass-border': 'rgba(255, 255, 255, 0.08)',
+    '--glass-hover': 'rgba(255, 255, 255, 0.08)',
+  };
 
   // ---- Init ----
 
@@ -163,6 +184,319 @@ const App = (() => {
     hidePlaybackUnlockPrompt();
   }
 
+  function setThemeVars(vars) {
+    const root = document.documentElement;
+    Object.entries(vars).forEach(([name, value]) => {
+      root.style.setProperty(name, value);
+    });
+  }
+
+  function resetReactiveTheme() {
+    activeThemeKey = 'default';
+    themeRequestToken += 1;
+    setThemeVars(DEFAULT_THEME_VARS);
+  }
+
+  function thumbnailForVideo(videoId) {
+    return videoId ? `https://img.youtube.com/vi/${videoId}/mqdefault.jpg` : '';
+  }
+
+  function syncThemeFromQueue(queueState) {
+    const currentItem = Array.isArray(queueState) ? null : queueState?.current || null;
+    if (!currentItem?.videoId && !currentItem?.thumbnail) {
+      resetReactiveTheme();
+      return;
+    }
+
+    const artworkUrl = currentItem.thumbnail || thumbnailForVideo(currentItem.videoId);
+    applyReactiveTheme(artworkUrl, currentItem.videoId || artworkUrl);
+  }
+
+  async function applyReactiveTheme(artworkUrl, cacheKey) {
+    const themeKey = cacheKey || artworkUrl || 'default';
+    if (!artworkUrl) {
+      resetReactiveTheme();
+      return;
+    }
+    if (themeKey === activeThemeKey) return;
+
+    if (themeCache.has(themeKey)) {
+      activeThemeKey = themeKey;
+      setThemeVars(themeCache.get(themeKey));
+      return;
+    }
+
+    const requestToken = ++themeRequestToken;
+
+    try {
+      const themeVars = await buildThemeFromArtwork(artworkUrl, cacheKey || artworkUrl);
+      if (requestToken !== themeRequestToken) return;
+      themeCache.set(themeKey, themeVars);
+      activeThemeKey = themeKey;
+      setThemeVars(themeVars);
+    } catch {
+      if (requestToken !== themeRequestToken) return;
+      const fallbackTheme = buildThemeFromSeed(cacheKey || artworkUrl);
+      themeCache.set(themeKey, fallbackTheme);
+      activeThemeKey = themeKey;
+      setThemeVars(fallbackTheme);
+    }
+  }
+
+  function buildThemeFromArtwork(artworkUrl, seed) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.referrerPolicy = 'no-referrer';
+      img.onload = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          const ctx = canvas.getContext('2d', { willReadFrequently: true });
+          if (!ctx) {
+            reject(new Error('canvas_unavailable'));
+            return;
+          }
+
+          canvas.width = 28;
+          canvas.height = 28;
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+          const swatch = deriveThemeSwatch(imageData, seed);
+          resolve(themeVarsFromSwatch(swatch));
+        } catch (error) {
+          reject(error);
+        }
+      };
+      img.onerror = reject;
+      img.src = artworkUrl;
+    });
+  }
+
+  function deriveThemeSwatch(imageData, seed) {
+    let totalWeight = 0;
+    let avgR = 0;
+    let avgG = 0;
+    let avgB = 0;
+    let vibrant = null;
+    let secondary = null;
+
+    for (let i = 0; i < imageData.length; i += 4) {
+      const alpha = imageData[i + 3];
+      if (alpha < 160) continue;
+      const rgb = { r: imageData[i], g: imageData[i + 1], b: imageData[i + 2] };
+      const hsl = rgbToHsl(rgb);
+      const luminance = relativeLuminance(rgb);
+      const weight = 0.65 + luminance;
+
+      totalWeight += weight;
+      avgR += rgb.r * weight;
+      avgG += rgb.g * weight;
+      avgB += rgb.b * weight;
+
+      const vibrantScore = hsl.s * 1.35 + Math.abs(hsl.l - 0.52) * 0.32;
+      if (!vibrant || vibrantScore > vibrant.score) {
+        secondary = vibrant;
+        vibrant = { rgb, hsl, score: vibrantScore };
+      } else if (!secondary || vibrantScore > secondary.score) {
+        secondary = { rgb, hsl, score: vibrantScore };
+      }
+    }
+
+    if (!totalWeight) {
+      return seedSwatchFromString(seed || 'jammin');
+    }
+
+    const average = {
+      r: Math.round(avgR / totalWeight),
+      g: Math.round(avgG / totalWeight),
+      b: Math.round(avgB / totalWeight),
+    };
+
+    return {
+      average,
+      vibrant: vibrant?.rgb || average,
+      secondary: secondary?.rgb || average,
+    };
+  }
+
+  function seedSwatchFromString(seed) {
+    const fallback = buildThemeFromSeed(seed);
+    return {
+      average: cssColorToRgb(fallback['--bg-mid']),
+      vibrant: cssColorToRgb(fallback['--accent-purple']),
+      secondary: cssColorToRgb(fallback['--accent-cyan']),
+    };
+  }
+
+  function buildThemeFromSeed(seed) {
+    let hash = 0;
+    const source = String(seed || 'jammin');
+    for (let i = 0; i < source.length; i += 1) {
+      hash = (hash << 5) - hash + source.charCodeAt(i);
+      hash |= 0;
+    }
+
+    const primary = hslToRgb({
+      h: normalizeHue((Math.abs(hash) % 360) / 360),
+      s: 0.62,
+      l: 0.62,
+    });
+    const secondary = hslToRgb({
+      h: normalizeHue(((Math.abs(hash) + 76) % 360) / 360),
+      s: 0.58,
+      l: 0.64,
+    });
+    const average = hslToRgb({
+      h: normalizeHue(((Math.abs(hash) + 22) % 360) / 360),
+      s: 0.34,
+      l: 0.34,
+    });
+
+    return themeVarsFromSwatch({ average, vibrant: primary, secondary });
+  }
+
+  function themeVarsFromSwatch({ average, vibrant, secondary }) {
+    const base = setHsl(rgbToHsl(average), {
+      s: 0.34,
+      l: 0.08,
+    });
+    const mid = setHsl(rgbToHsl(average), {
+      s: 0.28,
+      l: 0.14,
+    });
+    const accentPrimary = setHsl(rgbToHsl(vibrant), {
+      s: clamp(rgbToHsl(vibrant).s * 1.04, 0.42, 0.82),
+      l: clamp(Math.max(rgbToHsl(vibrant).l, 0.58), 0.56, 0.7),
+    });
+    const accentSecondary = setHsl(rgbToHsl(secondary), {
+      s: clamp(rgbToHsl(secondary).s * 0.96, 0.34, 0.74),
+      l: clamp(Math.max(rgbToHsl(secondary).l, 0.6), 0.56, 0.72),
+    });
+    const accentWarm = setHsl(rgbToHsl(average), {
+      h: normalizeHue(rgbToHsl(vibrant).h + 0.08),
+      s: 0.58,
+      l: 0.66,
+    });
+    const violet = setHsl(rgbToHsl(accentPrimary), {
+      s: clamp(rgbToHsl(accentPrimary).s * 0.88, 0.34, 0.74),
+      l: clamp(rgbToHsl(accentPrimary).l - 0.12, 0.34, 0.56),
+    });
+
+    return {
+      '--bg-deep': rgbToCss(base),
+      '--bg-mid': rgbToCss(mid),
+      '--bg-surface': rgbaString(mid, 0.68),
+      '--accent-pink': rgbToCss(accentWarm),
+      '--accent-cyan': rgbToCss(accentSecondary),
+      '--accent-purple': rgbToCss(accentPrimary),
+      '--accent-violet': rgbToCss(violet),
+      '--glow-pink': rgbaString(accentWarm, 0.3),
+      '--glow-cyan': rgbaString(accentSecondary, 0.28),
+      '--glow-purple': rgbaString(accentPrimary, 0.26),
+      '--theme-wash-1': rgbaString(accentPrimary, 0.14),
+      '--theme-wash-2': rgbaString(accentWarm, 0.1),
+      '--theme-wash-3': rgbaString(accentSecondary, 0.1),
+      '--glass-bg': rgbaString(mid, 0.44),
+      '--glass-border': rgbaString(accentPrimary, 0.16),
+      '--glass-hover': rgbaString(accentPrimary, 0.12),
+    };
+  }
+
+  function rgbToHsl({ r, g, b }) {
+    const rn = r / 255;
+    const gn = g / 255;
+    const bn = b / 255;
+    const max = Math.max(rn, gn, bn);
+    const min = Math.min(rn, gn, bn);
+    const lightness = (max + min) / 2;
+    const delta = max - min;
+
+    if (!delta) return { h: 0, s: 0, l: lightness };
+
+    const saturation = lightness > 0.5
+      ? delta / (2 - max - min)
+      : delta / (max + min);
+
+    let hue = 0;
+    switch (max) {
+      case rn:
+        hue = (gn - bn) / delta + (gn < bn ? 6 : 0);
+        break;
+      case gn:
+        hue = (bn - rn) / delta + 2;
+        break;
+      default:
+        hue = (rn - gn) / delta + 4;
+        break;
+    }
+
+    return { h: hue / 6, s: saturation, l: lightness };
+  }
+
+  function hslToRgb({ h, s, l }) {
+    if (s === 0) {
+      const value = Math.round(l * 255);
+      return { r: value, g: value, b: value };
+    }
+
+    const hue2rgb = (p, q, t) => {
+      let temp = t;
+      if (temp < 0) temp += 1;
+      if (temp > 1) temp -= 1;
+      if (temp < 1 / 6) return p + (q - p) * 6 * temp;
+      if (temp < 1 / 2) return q;
+      if (temp < 2 / 3) return p + (q - p) * (2 / 3 - temp) * 6;
+      return p;
+    };
+
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    return {
+      r: Math.round(hue2rgb(p, q, h + 1 / 3) * 255),
+      g: Math.round(hue2rgb(p, q, h) * 255),
+      b: Math.round(hue2rgb(p, q, h - 1 / 3) * 255),
+    };
+  }
+
+  function setHsl(hsl, overrides) {
+    return hslToRgb({
+      h: overrides.h ?? hsl.h,
+      s: overrides.s ?? hsl.s,
+      l: overrides.l ?? hsl.l,
+    });
+  }
+
+  function normalizeHue(value) {
+    if (value < 0) return value + 1;
+    if (value > 1) return value - 1;
+    return value;
+  }
+
+  function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+  }
+
+  function rgbaString({ r, g, b }, alpha) {
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+
+  function rgbToCss({ r, g, b }) {
+    return `rgb(${r}, ${g}, ${b})`;
+  }
+
+  function cssColorToRgb(color) {
+    const match = String(color).match(/\d+/g) || [0, 0, 0];
+    return {
+      r: Number(match[0] || 0),
+      g: Number(match[1] || 0),
+      b: Number(match[2] || 0),
+    };
+  }
+
+  function relativeLuminance({ r, g, b }) {
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  }
+
   function clearPlaybackUnlockCheck() {
     if (playbackUnlockTimer) {
       clearTimeout(playbackUnlockTimer);
@@ -184,7 +518,7 @@ const App = (() => {
     const unlockBtn = document.getElementById('player-unlock-btn');
     const overlayEl = document.getElementById('player-overlay');
     if (unlockBtn) {
-      unlockBtn.textContent = isHost ? 'Tap To Start Playback' : 'Tap To Join Live';
+      unlockBtn.textContent = isHost ? 'Start playback on this device' : 'Join on this device';
       unlockBtn.classList.remove('hidden');
     }
     if (overlayEl) {
@@ -242,7 +576,7 @@ const App = (() => {
       Player.playVideo();
     }
 
-    Notifications.success(isHost ? 'Playback started on this device' : 'Joined live session', 2200);
+    Notifications.success(isHost ? 'Playback started on this device' : 'Joined the room playback', 2200);
     hidePlaybackUnlockPrompt();
     schedulePlaybackUnlockCheck(2200);
   }
@@ -501,7 +835,7 @@ const App = (() => {
 
     pendingControlTransfer = {
       userId: targetUserId,
-      username: targetUsername || 'this viber',
+      username: targetUsername || 'this listener',
     };
 
     const modal = document.getElementById('control-transfer-modal');
@@ -550,7 +884,7 @@ const App = (() => {
       return;
     }
 
-    Notifications.info(`${msg.toUsername || 'Someone'} is controlling the vibe now`);
+    Notifications.info(`${msg.toUsername || 'Someone'} now has playback controls`);
   }
 
   // ---- WebSocket Connection ----
@@ -651,6 +985,7 @@ const App = (() => {
         break;
       case 'QUEUE_UPDATED':
         QueueUI.update(msg.queue);
+        syncThemeFromQueue(msg.queue);
         break;
       case 'PARTICIPANT_UPDATE':
         syncParticipantsState(msg.participants);
@@ -666,7 +1001,8 @@ const App = (() => {
         break;
       case 'QUEUE_EMPTY':
         updateRoomPlaybackContext('QUEUE_EMPTY');
-        Notifications.info('Queue is empty — add more songs!');
+        resetReactiveTheme();
+        Notifications.info('Queue is empty. Add more tracks to keep going.');
         Player.showPlaceholder();
         SyncClient.updatePlayButton('paused');
         {
@@ -713,7 +1049,7 @@ const App = (() => {
 
     switchToSessionView(msg.code, msg.username);
     syncParticipantsState(msg.participants || []);
-    Notifications.success('Session created — share the code!');
+    Notifications.success('Session ready. Share the code.');
   }
 
   function handleSessionJoined(msg) {
@@ -725,12 +1061,13 @@ const App = (() => {
 
     switchToSessionView(msg.code, msg.username);
     syncParticipantsState(msg.participants || []);
-    Notifications.success('Joined live session');
+    Notifications.success('Joined the room');
   }
 
   function handleSessionState(msg) {
     // Full state from server on join
     if (msg.queue) QueueUI.update(msg.queue);
+    if (msg.queue) syncThemeFromQueue(msg.queue);
     if (msg.participants) syncParticipantsState(msg.participants);
     if (msg.chat) Chat.setHistory(msg.chat);
 
@@ -774,9 +1111,9 @@ const App = (() => {
     if (codeEl) codeEl.textContent = code;
     
     // Add username next to the logo
-    const logoEl = document.querySelector('.logo-small');
-    if (logoEl && displayUsername) {
-      logoEl.innerHTML = `🎵 Jammin <span style="opacity:0.5; font-size: 0.8em; margin-left: 8px;">| ${displayUsername}</span>`;
+    const headerUsernameEl = document.getElementById('header-username');
+    if (headerUsernameEl) {
+      headerUsernameEl.textContent = displayUsername || 'Anonymous';
     }
 
     refreshControllerAccess();

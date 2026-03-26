@@ -10,7 +10,11 @@ const QueueUI = (() => {
   };
   let dragState = null;
   let openMenuEl = null;
+  let openMenuCloseTimer = null;
+  let openMenuFadeTimer = null;
   let hasBoundGlobalMenuListeners = false;
+  const MENU_CLOSE_DELAY_MS = 1500;
+  const MENU_FADE_MS = 180;
 
   function init() {
     listEl = document.getElementById('queue-list');
@@ -74,7 +78,7 @@ const QueueUI = (() => {
       });
     } else {
       listEl.appendChild(
-        createHelperCard('No tracks waiting', 'Add another YouTube link to keep the vibe moving.')
+        createHelperCard('No tracks waiting', 'Search for another song to keep the queue moving.')
       );
     }
   }
@@ -318,23 +322,23 @@ const QueueUI = (() => {
 
     if (listEl) {
       listEl.addEventListener('scroll', () => {
-        closeOpenMenu();
+        closeOpenMenu({ animate: false });
       });
     }
 
     document.addEventListener('click', (e) => {
       if (!openMenuEl) return;
       if (openMenuEl.contains(e.target)) return;
-      closeOpenMenu();
+      closeOpenMenu({ animate: false });
     });
 
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
-        closeOpenMenu();
+        closeOpenMenu({ animate: false });
       }
     });
 
-    window.addEventListener('resize', closeOpenMenu);
+    window.addEventListener('resize', () => closeOpenMenu({ animate: false }));
   }
 
   function bindRowMenu(el, actions) {
@@ -345,12 +349,14 @@ const QueueUI = (() => {
     trigger.addEventListener('click', (e) => {
       e.stopPropagation();
       if (openMenuEl && openMenuEl !== menuWrap) {
-        closeOpenMenu();
+        closeOpenMenu({ animate: false });
       }
 
+      cancelOpenMenuClose();
       const isOpen = menuWrap.classList.toggle('open');
       el.classList.toggle('menu-open', isOpen);
       if (isOpen) {
+        menuWrap.classList.remove('closing');
         positionRowMenu(menuWrap);
       } else {
         menuWrap.classList.remove('open-upward');
@@ -363,23 +369,89 @@ const QueueUI = (() => {
       button.addEventListener('click', (e) => {
         e.stopPropagation();
         const action = button.dataset.action;
-        closeOpenMenu();
+        closeOpenMenu({ animate: false });
         if (action && typeof actions[action] === 'function') {
           actions[action]();
         }
       });
     });
+
+    el.addEventListener('pointerenter', () => {
+      if (openMenuEl === menuWrap) {
+        cancelOpenMenuClose();
+      }
+    });
+
+    el.addEventListener('pointerleave', () => {
+      if (openMenuEl === menuWrap) {
+        scheduleOpenMenuClose();
+      }
+    });
   }
 
-  function closeOpenMenu() {
+  function scheduleOpenMenuClose() {
     if (!openMenuEl) return;
+    if (openMenuCloseTimer || openMenuFadeTimer) return;
+
+    openMenuCloseTimer = setTimeout(() => {
+      openMenuCloseTimer = null;
+      closeOpenMenu({ animate: true });
+    }, MENU_CLOSE_DELAY_MS);
+  }
+
+  function cancelOpenMenuClose() {
+    if (openMenuCloseTimer) {
+      clearTimeout(openMenuCloseTimer);
+      openMenuCloseTimer = null;
+    }
+
+    if (openMenuFadeTimer) {
+      clearTimeout(openMenuFadeTimer);
+      openMenuFadeTimer = null;
+    }
+
+    if (openMenuEl) {
+      openMenuEl.classList.remove('closing');
+      openMenuEl.classList.add('open');
+    }
+  }
+
+  function closeOpenMenu({ animate = false } = {}) {
+    if (!openMenuEl) return;
+    cancelOpenMenuClose();
     const trigger = openMenuEl.querySelector('.queue-row-menu-trigger');
     const row = openMenuEl.closest('.queue-row');
-    openMenuEl.classList.remove('open');
-    openMenuEl.classList.remove('open-upward');
+
+    if (animate) {
+      openMenuEl.classList.add('closing');
+      openMenuEl.classList.remove('open');
+      if (trigger) trigger.setAttribute('aria-expanded', 'false');
+
+      const menuToClose = openMenuEl;
+      openMenuFadeTimer = setTimeout(() => {
+        if (menuToClose === openMenuEl) {
+          finalizeOpenMenuClose(menuToClose, row, trigger);
+        } else {
+          menuToClose.classList.remove('closing');
+          menuToClose.classList.remove('open-upward');
+        }
+        openMenuFadeTimer = null;
+      }, MENU_FADE_MS);
+      return;
+    }
+
+    finalizeOpenMenuClose(openMenuEl, row, trigger);
+  }
+
+  function finalizeOpenMenuClose(menuEl, row, trigger) {
+    menuEl.classList.remove('open');
+    menuEl.classList.remove('closing');
+    menuEl.classList.remove('open-upward');
     if (row) row.classList.remove('menu-open');
     if (trigger) trigger.setAttribute('aria-expanded', 'false');
-    openMenuEl = null;
+    if (menuEl === openMenuEl) {
+      openMenuEl = null;
+    }
   }
 
   function positionRowMenu(menuWrap) {

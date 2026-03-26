@@ -115,14 +115,14 @@ const Participants = (() => {
       listEl.appendChild(item);
     });
 
-    // Update vibe controller text
+    // Update playback controller text
     const controller = currentParticipants.find((participant) => participant.isHost);
     if (controller && controllerEl) {
       controllerEl.textContent = controller.userId === currentOptions.currentUserId
-        ? 'You are controlling the vibe right now'
-        : `${controller.username} is controlling the vibe right now`;
+        ? 'You currently have playback controls'
+        : `${controller.username} currently has playback controls`;
     } else if (controllerEl) {
-      controllerEl.textContent = 'No one is controlling the vibe';
+      controllerEl.textContent = 'Playback controls are currently unassigned';
     }
   }
 
