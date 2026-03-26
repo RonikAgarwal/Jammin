@@ -13,6 +13,9 @@ const App = (() => {
   let seekTotalEl = null;
   let isDraggingSeek = false;
   let seekUpdateInterval = null;
+  let lastSentSeekTime = null;
+  let lastSentSeekAt = 0;
+  let stopParticlesAnimation = null;
 
   // ---- Init ----
 
@@ -40,23 +43,12 @@ const App = (() => {
         send({ type: 'PLAYER_READY' });
       },
       onEnded: () => {
-        send({ type: 'VIDEO_ENDED' });
-      },
-      onAdStart: () => {
-        send({ type: 'AD_START' });
-        Notifications.info('Ad playing — will sync back after');
-      },
-      onAdEnd: () => {
-        send({ type: 'AD_END' });
+        if (isHost) {
+          send({ type: 'VIDEO_ENDED' });
+        }
       },
       onPlayStateChange: (state) => {
         SyncClient.updatePlayButton(state);
-        if (state === 'paused' && isHost) {
-          send({ type: 'PAUSE' });
-        } else if (state === 'playing' && isHost) {
-          const time = Player.getCurrentTime();
-          send({ type: 'RESUME', currentTime: time });
-        }
       },
     });
   }
@@ -125,6 +117,25 @@ const App = (() => {
     }
   }
 
+  function broadcastHostSeek(time) {
+    if (!isHost || typeof time !== 'number' || isNaN(time)) return;
+
+    // The seek bar sends immediately for responsiveness; the player's own
+    // seek detector may also fire shortly after. Collapse both into one event.
+    const now = Date.now();
+    if (
+      lastSentSeekTime !== null &&
+      Math.abs(lastSentSeekTime - time) < 0.5 &&
+      now - lastSentSeekAt < 1200
+    ) {
+      return;
+    }
+
+    lastSentSeekTime = time;
+    lastSentSeekAt = now;
+    send({ type: 'SEEK', seekTime: time });
+  }
+
   function attemptReconnect() {
     if (reconnectAttempts >= MAX_RECONNECT) {
       Notifications.error('Connection lost. Please refresh the page.');
@@ -181,6 +192,10 @@ const App = (() => {
         Notifications.info('Queue is empty — add more songs!');
         Player.showPlaceholder();
         SyncClient.updatePlayButton('paused');
+        {
+          const titleEl = document.getElementById('now-playing-title');
+          if (titleEl) titleEl.textContent = 'Nothing playing';
+        }
         break;
       case 'ERROR':
         Notifications.error(msg.message);
@@ -230,22 +245,16 @@ const App = (() => {
 
     // If there's a current video, sync to it
     if (msg.currentVideo && msg.playbackState !== 'idle') {
-      Player.cueVideo(msg.currentVideo.videoId);
-
       const titleEl = document.getElementById('now-playing-title');
       if (titleEl) titleEl.textContent = msg.currentVideo.title || 'Playing';
 
-      // After a brief delay for cue, seek and play
-      setTimeout(() => {
-        if (msg.playbackState === 'playing') {
-          Player.seekTo(msg.currentTime || 0);
-          Player.playVideo();
-          SyncClient.updatePlayButton('playing');
-        } else if (msg.playbackState === 'paused') {
-          Player.seekTo(msg.currentTime || 0);
-          SyncClient.updatePlayButton('paused');
-        }
-      }, 1000);
+      if (msg.playbackState === 'playing') {
+        Player.loadVideo(msg.currentVideo.videoId, msg.currentTime || 0);
+        SyncClient.updatePlayButton('playing');
+      } else if (msg.playbackState === 'paused') {
+        Player.cueVideo(msg.currentVideo.videoId, msg.currentTime || 0);
+        SyncClient.updatePlayButton('paused');
+      }
     }
   }
 
@@ -254,6 +263,10 @@ const App = (() => {
   function switchToSessionView(code, displayUsername) {
     document.getElementById('landing-view').classList.remove('active');
     document.getElementById('session-view').classList.add('active');
+    if (stopParticlesAnimation) {
+      stopParticlesAnimation();
+      stopParticlesAnimation = null;
+    }
 
     const codeEl = document.getElementById('session-code-value');
     if (codeEl) codeEl.textContent = code;
@@ -340,7 +353,7 @@ const App = (() => {
         }
         const val = parseFloat(seekBarEl.value);
         Player.seekTo(val);
-        // Player's internal seek detector will catch this and send SEEK automatically
+        broadcastHostSeek(val);
         isDraggingSeek = false;
       });
     }
@@ -396,10 +409,11 @@ const App = (() => {
       const state = Player.getState();
       if (state === YT.PlayerState.PLAYING) {
         Player.pauseVideo();
-        // The onPlayStateChange callback will handle sending the PAUSE event
+        send({ type: 'PAUSE' });
       } else {
+        const time = Player.getCurrentTime();
         Player.playVideo();
-        // The onPlayStateChange callback will handle sending the RESUME event
+        send({ type: 'RESUME', currentTime: time });
       }
     });
 
@@ -437,8 +451,11 @@ const App = (() => {
         const state = Player.getState();
         if (state === YT.PlayerState.PLAYING) {
           Player.pauseVideo();
+          send({ type: 'PAUSE' });
         } else {
-          Player.playWithDelay(0);
+          const time = Player.getCurrentTime();
+          Player.playVideo();
+          send({ type: 'RESUME', currentTime: time });
         }
       });
     }
@@ -474,9 +491,12 @@ const App = (() => {
     const canvas = document.getElementById('particles-canvas');
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
+    if (!ctx) return;
 
     let particles = [];
     const PARTICLE_COUNT = 50;
+    let isActive = true;
+    let animationFrameId = null;
 
     function resize() {
       canvas.width = window.innerWidth;
@@ -498,6 +518,7 @@ const App = (() => {
     }
 
     function animate() {
+      if (!isActive) return;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       particles.forEach(p => {
@@ -534,8 +555,18 @@ const App = (() => {
         }
       }
 
-      requestAnimationFrame(animate);
+      animationFrameId = requestAnimationFrame(animate);
     }
+
+    stopParticlesAnimation = () => {
+      isActive = false;
+      if (animationFrameId !== null) {
+        cancelAnimationFrame(animationFrameId);
+      }
+      window.removeEventListener('resize', resize);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      canvas.style.display = 'none';
+    };
 
     animate();
   }

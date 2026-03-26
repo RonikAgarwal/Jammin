@@ -1,6 +1,6 @@
 // Lag Detection System
 
-const { getCurrentReferenceTime, sendTo } = require('./session');
+const { getCurrentReferenceTime, sendTo, broadcast, getParticipantList } = require('./session');
 
 const SYNC_CHECK_INTERVAL_MS = 2500; // Check every 2.5 seconds
 const LAG_IGNORE_THRESHOLD = 1.0; // < 1s: ignore
@@ -44,7 +44,15 @@ function handleTimeReport(session, userId, reportedTime) {
 
   if (lagInfo) {
     // Update participant status
+    const previousStatus = participant.status;
     participant.status = lagInfo.status;
+
+    if (previousStatus !== participant.status) {
+      broadcast(session, {
+        type: 'PARTICIPANT_UPDATE',
+        participants: getParticipantList(session),
+      });
+    }
 
     // Only send update if meaningful change
     if (shouldSendUpdate(participant, lagInfo)) {

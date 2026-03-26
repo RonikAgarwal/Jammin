@@ -6,81 +6,63 @@ const {
   sendTo,
   getParticipantList,
 } = require('./session');
-const { getNextInQueue } = require('./queue');
+const {
+  getNextInQueue,
+  getQueueState,
+  archiveCurrentVideo,
+  getPreviousTrack,
+  broadcastQueueUpdate,
+} = require('./queue');
 
-const PRELOAD_TIMEOUT_MS = 2000; // 1-2 seconds max wait
-const MAJORITY_THRESHOLD = 0.6; // 60% of users ready = go
-const PLAY_DELAY_MS = 300; // slight delay for coordinated start
+const RESUME_DELAY_MS = 120;
 
-function initiatePreload(session, videoItem) {
-  // Set session state
+function startPlayback(session, videoItem, startTime = 0) {
+  if (!videoItem) return;
+  if (session.currentVideo && session.currentVideo.id !== videoItem.id) {
+    archiveCurrentVideo(session);
+  }
+
   session.currentVideo = {
-    videoId: videoItem.videoId,
-    title: videoItem.title,
-    thumbnail: videoItem.thumbnail,
+    ...videoItem,
   };
-  session.playbackState = 'cueing';
+  session.playbackState = 'playing';
   session.readyUsers.clear();
-  session.referenceTime = 0;
-  session.referenceStartedAt = null;
+  session.referenceTime = startTime;
+  session.referenceStartedAt = Date.now();
+  session.vibeSource = videoItem.videoId;
 
-  // Tell all clients to cue the video
   broadcast(session, {
-    type: 'CUE_VIDEO',
+    type: 'PLAY',
     videoId: videoItem.videoId,
     title: videoItem.title,
+    startTime,
   });
 
-  // Set timeout — don't wait forever
-  if (session.preloadTimeout) clearTimeout(session.preloadTimeout);
-  session.preloadTimeout = setTimeout(() => {
-    triggerSynchronizedPlay(session);
-  }, PRELOAD_TIMEOUT_MS);
+  broadcastQueueUpdate(session);
 }
 
 function handlePlayerReady(session, userId) {
-  session.readyUsers.add(userId);
-
-  const totalUsers = session.participants.size;
-  const readyCount = session.readyUsers.size;
-
-  // Check majority
-  if (readyCount >= Math.ceil(totalUsers * MAJORITY_THRESHOLD)) {
-    if (session.preloadTimeout) {
-      clearTimeout(session.preloadTimeout);
-      session.preloadTimeout = null;
-    }
-    triggerSynchronizedPlay(session);
-  }
-}
-
-function triggerSynchronizedPlay(session) {
-  if (session.playbackState !== 'cueing') return;
-
-  session.playbackState = 'playing';
-  session.referenceTime = 0;
-  session.referenceStartedAt = Date.now() + PLAY_DELAY_MS;
-
-  // Send play signal with a slight future timestamp
-  broadcast(session, {
-    type: 'PLAY',
-    startTime: 0,
-    delay: PLAY_DELAY_MS,
-  });
+  // No-op. Playback now starts immediately instead of waiting for preload
+  // coordination, but we keep the message wired for compatibility.
+  return { session, userId };
 }
 
 function handleVideoEnded(session, userId) {
-  // Only process from host or first reporter
+  if (session.host !== userId) return;
   if (session.playbackState !== 'playing') return;
 
   session.playbackState = 'idle';
+  session.referenceTime = 0;
   session.referenceStartedAt = null;
 
   // Try next in queue
   const nextItem = getNextInQueue(session);
   if (nextItem) {
-    initiatePreload(session, nextItem);
+    startPlayback(session, nextItem);
   } else {
+    archiveCurrentVideo(session);
+    session.currentVideo = null;
+    broadcastQueueUpdate(session);
     // Queue empty — notify clients
     broadcast(session, {
       type: 'QUEUE_EMPTY',
@@ -108,6 +90,7 @@ function handleSeek(session, userId, seekTime) {
 function handlePause(session, userId) {
   if (session.host !== userId) return;
   if (session.playbackState === 'paused') return;
+  if (!session.currentVideo) return;
 
   const currentRef = getCurrentReferenceTime(session);
   session.referenceTime = currentRef;
@@ -120,6 +103,7 @@ function handlePause(session, userId) {
 function handleResume(session, userId, clientCurrentTime) {
   if (session.host !== userId) return;
   if (session.playbackState === 'playing') return;
+  if (!session.currentVideo) return;
 
   session.playbackState = 'playing';
   // Use the client's reported time if available, otherwise fallback to our reference
@@ -132,7 +116,7 @@ function handleResume(session, userId, clientCurrentTime) {
   broadcast(session, {
     type: 'RESUME',
     currentTime: session.referenceTime,
-    delay: PLAY_DELAY_MS,
+    delay: RESUME_DELAY_MS,
   }, userId);
 }
 
@@ -144,13 +128,7 @@ function handleNewJoin(session, userId) {
     currentVideo: session.currentVideo,
     playbackState: session.playbackState,
     currentTime: currentRef,
-    queue: session.queue.map(q => ({
-      id: q.id,
-      videoId: q.videoId,
-      title: q.title,
-      thumbnail: q.thumbnail,
-      addedBy: q.addedBy,
-    })),
+    queue: getQueueState(session),
     participants: getParticipantList(session),
     vibeSource: session.vibeSource,
   });
@@ -212,21 +190,43 @@ function handleSkipTrack(session, userId) {
   if (session.host !== userId) return;
 
   session.playbackState = 'idle';
+  session.referenceTime = 0;
   session.referenceStartedAt = null;
-
   const nextItem = getNextInQueue(session);
   if (nextItem) {
-    initiatePreload(session, nextItem);
-  } else {
-    broadcast(session, {
-      type: 'QUEUE_EMPTY',
-      vibeSource: session.vibeSource,
-    });
+    startPlayback(session, nextItem);
+    return;
   }
+
+  archiveCurrentVideo(session);
+  session.currentVideo = null;
+  broadcastQueueUpdate(session);
+  broadcast(session, {
+    type: 'QUEUE_EMPTY',
+    vibeSource: session.vibeSource,
+  });
+}
+
+function handlePrevTrack(session, userId) {
+  if (session.host !== userId) return;
+
+  const previousTrack = getPreviousTrack(session);
+  if (!previousTrack) return;
+
+  if (session.currentVideo) {
+    session.queue.unshift(session.currentVideo);
+  }
+
+  session.playbackState = 'idle';
+  session.referenceTime = 0;
+  session.referenceStartedAt = null;
+  session.currentVideo = null;
+
+  startPlayback(session, previousTrack);
 }
 
 module.exports = {
-  initiatePreload,
+  startPlayback,
   handlePlayerReady,
   handleVideoEnded,
   handleSeek,
@@ -237,4 +237,5 @@ module.exports = {
   handleAdEnd,
   handleGoLive,
   handleSkipTrack,
+  handlePrevTrack,
 };

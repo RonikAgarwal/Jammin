@@ -26,6 +26,7 @@ function createSession(ws, username) {
     participants: new Map([[userId, participant]]),
     queue: [],
     currentVideo: null,
+    history: [],
     playbackState: 'idle', // idle | cueing | playing | paused
     referenceTime: 0,
     referenceStartedAt: null, // server timestamp when play started

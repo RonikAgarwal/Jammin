@@ -3,23 +3,19 @@
 const Player = (() => {
   let player = null;
   let isReady = false;
-  let isAdPlaying = false;
   let timeReportInterval = null;
   let onReadyCallback = null;
   let onEndedCallback = null;
-  let onAdStartCallback = null;
-  let onAdEndCallback = null;
   let onPlayStateChangeCallback = null;
   let onSeekCallback = null;
   let currentVideoId = null;
   let lastRecordedTime = 0;
   let seekDetectInterval = null;
+  let pendingAction = null;
 
   function init(callbacks = {}) {
     onReadyCallback = callbacks.onReady || null;
     onEndedCallback = callbacks.onEnded || null;
-    onAdStartCallback = callbacks.onAdStart || null;
-    onAdEndCallback = callbacks.onAdEnd || null;
     onPlayStateChangeCallback = callbacks.onPlayStateChange || null;
     onSeekCallback = callbacks.onSeek || null;
 
@@ -56,6 +52,20 @@ const Player = (() => {
 
   function handleReady() {
     isReady = true;
+    if (pendingAction) {
+      const action = pendingAction;
+      pendingAction = null;
+      action();
+    }
+  }
+
+  function runWhenReady(action) {
+    if (!player || !isReady) {
+      pendingAction = action;
+      return false;
+    }
+    action();
+    return true;
   }
 
   function handleStateChange(event) {
@@ -63,11 +73,6 @@ const Player = (() => {
 
     switch (state) {
       case YT.PlayerState.PLAYING:
-        // Check if recovering from ad
-        if (isAdPlaying) {
-          isAdPlaying = false;
-          if (onAdEndCallback) onAdEndCallback();
-        }
         hidePlaceholder();
         if (onPlayStateChangeCallback) onPlayStateChangeCallback('playing');
         startTimeReporting();
@@ -90,19 +95,6 @@ const Player = (() => {
         // Video cued and ready
         if (onReadyCallback) onReadyCallback();
         break;
-
-      case -1: // Unstarted — could be ad
-        // Detect ad: if we have a video loaded and state goes to -1
-        if (currentVideoId && !isAdPlaying) {
-          // Small delay to confirm it's actually an ad
-          setTimeout(() => {
-            if (player && player.getPlayerState && player.getPlayerState() === -1) {
-              isAdPlaying = true;
-              if (onAdStartCallback) onAdStartCallback();
-            }
-          }, 500);
-        }
-        break;
     }
   }
 
@@ -111,26 +103,44 @@ const Player = (() => {
     Notifications.error('Video playback error');
   }
 
-  function cueVideo(videoId) {
-    if (!player || !isReady) return;
-    currentVideoId = videoId;
-    player.cueVideoById(videoId);
-    hidePlaceholder();
+  function cueVideo(videoId, startTime = 0) {
+    runWhenReady(() => {
+      currentVideoId = videoId;
+      player.cueVideoById({
+        videoId,
+        startSeconds: startTime,
+      });
+      hidePlaceholder();
+    });
+  }
+
+  function loadVideo(videoId, startTime = 0) {
+    runWhenReady(() => {
+      currentVideoId = videoId;
+      player.loadVideoById({
+        videoId,
+        startSeconds: startTime,
+      });
+      hidePlaceholder();
+    });
   }
 
   function playVideo() {
-    if (!player || !isReady) return;
-    player.playVideo();
+    runWhenReady(() => {
+      player.playVideo();
+    });
   }
 
   function pauseVideo() {
-    if (!player || !isReady) return;
-    player.pauseVideo();
+    runWhenReady(() => {
+      player.pauseVideo();
+    });
   }
 
   function seekTo(time) {
-    if (!player || !isReady) return;
-    player.seekTo(time, true);
+    runWhenReady(() => {
+      player.seekTo(time, true);
+    });
   }
 
   function getCurrentTime() {
@@ -204,6 +214,7 @@ const Player = (() => {
   return {
     init,
     cueVideo,
+    loadVideo,
     playVideo,
     pauseVideo,
     seekTo,

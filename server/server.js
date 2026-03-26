@@ -21,11 +21,12 @@ const {
   removeFromQueue,
   playSelected,
   getQueueList,
+  requeueHistoryItem,
   parseYouTubeUrl,
 } = require('./queue');
 
 const {
-  initiatePreload,
+  startPlayback,
   handlePlayerReady,
   handleVideoEnded,
   handleSeek,
@@ -36,6 +37,7 @@ const {
   handleAdEnd,
   handleGoLive,
   handleSkipTrack,
+  handlePrevTrack,
 } = require('./sync');
 
 const { handleTimeReport } = require('./lag');
@@ -113,6 +115,8 @@ function handleMessage(ws, msg) {
       return handleRemoveFromQueue(ws, msg);
     case 'PLAY_SELECTED':
       return handlePlaySelected(ws, msg);
+    case 'REQUEUE_HISTORY_ITEM':
+      return handleRequeueHistoryItem(ws, msg);
     case 'TIME_REPORT':
       return handleTimeReportMsg(ws, msg);
     case 'PLAYER_READY':
@@ -133,6 +137,8 @@ function handleMessage(ws, msg) {
       return handleResumeMsg(ws, msg);
     case 'SKIP_TRACK':
       return handleSkipTrackMsg(ws, msg);
+    case 'PREV_TRACK':
+      return handlePrevTrackMsg(ws, msg);
     default:
       send(ws, { type: 'ERROR', message: 'Unknown message type' });
   }
@@ -198,17 +204,18 @@ async function handleAddToQueue(ws, msg) {
   const videoId = parseYouTubeUrl(msg.videoUrl || '');
   if (!videoId) return send(ws, { type: 'ERROR', message: 'Invalid YouTube URL' });
 
-  const title = await fetchVideoTitle(videoId);
+  const details = await fetchVideoDetails(videoId);
   const videoInfo = {
     videoId,
-    title,
+    title: details.title,
+    artist: details.artist,
     thumbnail: `https://img.youtube.com/vi/${videoId}/mqdefault.jpg`,
   };
 
   const result = addToQueue(session, videoInfo, ws._jammin.username);
 
   if (result.autoPlay) {
-    initiatePreload(session, result.item);
+    startPlayback(session, result.item);
   }
 }
 
@@ -220,17 +227,18 @@ async function handlePlayNext(ws, msg) {
   const videoId = parseYouTubeUrl(msg.videoUrl || '');
   if (!videoId) return send(ws, { type: 'ERROR', message: 'Invalid YouTube URL' });
 
-  const title = await fetchVideoTitle(videoId);
+  const details = await fetchVideoDetails(videoId);
   const videoInfo = {
     videoId,
-    title,
+    title: details.title,
+    artist: details.artist,
     thumbnail: `https://img.youtube.com/vi/${videoId}/mqdefault.jpg`,
   };
 
   const result = playNext(session, videoInfo, ws._jammin.username);
 
   if (result.autoPlay) {
-    initiatePreload(session, result.item);
+    startPlayback(session, result.item);
   }
 }
 
@@ -252,8 +260,14 @@ function handlePlaySelected(ws, msg) {
 
   const item = playSelected(session, msg.itemId);
   if (item) {
-    initiatePreload(session, item);
+    startPlayback(session, item);
   }
+}
+
+function handleRequeueHistoryItem(ws, msg) {
+  const session = getSessionByWs(ws);
+  if (!session || !ws._jammin || session.host !== ws._jammin.userId) return;
+  requeueHistoryItem(session, msg.itemId, msg.toIndex);
 }
 
 function handleTimeReportMsg(ws, msg) {
@@ -316,6 +330,12 @@ function handleSkipTrackMsg(ws, msg) {
   handleSkipTrack(session, ws._jammin.userId);
 }
 
+function handlePrevTrackMsg(ws, msg) {
+  const session = getSessionByWs(ws);
+  if (!session || !ws._jammin) return;
+  handlePrevTrack(session, ws._jammin.userId);
+}
+
 // Utility
 function send(ws, data) {
   if (ws.readyState === 1) {
@@ -324,18 +344,24 @@ function send(ws, data) {
 }
 
 // Fetch video title from YouTube oEmbed API
-async function fetchVideoTitle(videoId) {
+async function fetchVideoDetails(videoId) {
   try {
     const url = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`;
     const response = await fetch(url);
     if (response.ok) {
       const data = await response.json();
-      return data.title || 'Untitled';
+      return {
+        title: data.title || 'Untitled',
+        artist: data.author_name || '',
+      };
     }
   } catch (e) {
     // Silently fail
   }
-  return 'Untitled';
+  return {
+    title: 'Untitled',
+    artist: '',
+  };
 }
 
 server.listen(PORT, () => {

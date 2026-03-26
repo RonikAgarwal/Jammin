@@ -56,8 +56,15 @@ const SyncClient = (() => {
   }
 
   function handlePlay(msg) {
-    const delay = msg.delay || 0;
-    Player.playWithDelay(msg.startTime || 0, delay);
+    if (msg.videoId) {
+      Player.loadVideo(msg.videoId, msg.startTime || 0);
+    } else {
+      const delay = msg.delay || 0;
+      Player.playWithDelay(msg.startTime || 0, delay);
+    }
+
+    const titleEl = document.getElementById('now-playing-title');
+    if (titleEl) titleEl.textContent = msg.title || 'Playing';
 
     updatePlayButton('playing');
     Notifications.success("You're live");
@@ -77,7 +84,12 @@ const SyncClient = (() => {
 
   function handleResume(msg) {
     const delay = msg.delay || 0;
-    Player.playWithDelay(msg.currentTime || 0, delay);
+    if (delay > 0) {
+      Player.playWithDelay(msg.currentTime || 0, delay);
+    } else {
+      Player.seekTo(msg.currentTime || 0);
+      Player.playVideo();
+    }
     updatePlayButton('playing');
   }
 

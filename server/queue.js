@@ -1,50 +1,51 @@
 // Queue Management System
 
 const { broadcast } = require('./session');
+const HISTORY_LIMIT = 12;
 
-function addToQueue(session, videoInfo, addedBy) {
-  const item = {
+function createQueueItem(videoInfo, addedBy) {
+  return {
     id: 'q_' + Math.random().toString(36).substring(2, 8),
     videoId: videoInfo.videoId,
     title: videoInfo.title || 'Unknown Title',
     thumbnail: videoInfo.thumbnail || '',
-    addedBy: addedBy,
+    addedBy,
+    artist: videoInfo.artist || '',
+    duration: videoInfo.duration || '',
     addedAt: Date.now(),
   };
+}
 
-  session.queue.push(item);
+function addToQueue(session, videoInfo, addedBy) {
+  const item = createQueueItem(videoInfo, addedBy);
+
   session.vibeSource = videoInfo.videoId;
 
-  broadcastQueueUpdate(session);
-
-  // If nothing is playing, start this video
-  if (session.playbackState === 'idle' && session.queue.length === 1) {
+  // If nothing is playing, start this video immediately and keep the queue
+  // reserved for upcoming tracks only.
+  if (session.playbackState === 'idle' && !session.currentVideo) {
     return { autoPlay: true, item };
   }
+
+  session.queue.push(item);
+  broadcastQueueUpdate(session);
 
   return { autoPlay: false, item };
 }
 
 function playNext(session, videoInfo, addedBy) {
-  const item = {
-    id: 'q_' + Math.random().toString(36).substring(2, 8),
-    videoId: videoInfo.videoId,
-    title: videoInfo.title || 'Unknown Title',
-    thumbnail: videoInfo.thumbnail || '',
-    addedBy: addedBy,
-    addedAt: Date.now(),
-  };
+  const item = createQueueItem(videoInfo, addedBy);
+
+  session.vibeSource = videoInfo.videoId;
+
+  // If nothing is playing, start this video
+  if (session.playbackState === 'idle' && !session.currentVideo) {
+    return { autoPlay: true, item };
+  }
 
   // Insert at position 0 (next up)
   session.queue.unshift(item);
-  session.vibeSource = videoInfo.videoId;
-
   broadcastQueueUpdate(session);
-
-  // If nothing is playing, start this video
-  if (session.playbackState === 'idle') {
-    return { autoPlay: true, item };
-  }
 
   return { autoPlay: false, item };
 }
@@ -91,19 +92,62 @@ function getNextInQueue(session) {
 }
 
 function getQueueList(session) {
-  return session.queue.map(item => ({
+  return session.queue.map(formatQueueItem);
+}
+
+function getQueueState(session) {
+  return {
+    current: session.currentVideo ? formatQueueItem(session.currentVideo) : null,
+    upcoming: getQueueList(session),
+    history: (session.history || []).map(formatQueueItem),
+  };
+}
+
+function archiveCurrentVideo(session) {
+  if (!session.currentVideo) return;
+
+  session.history = session.history || [];
+  session.history.unshift({
+    ...session.currentVideo,
+    playedAt: Date.now(),
+  });
+  session.history = session.history.slice(0, HISTORY_LIMIT);
+}
+
+function getPreviousTrack(session) {
+  if (!session.history || session.history.length === 0) return null;
+  return session.history.shift();
+}
+
+function requeueHistoryItem(session, itemId, toIndex = 0) {
+  if (!session.history || session.history.length === 0) return false;
+
+  const historyIndex = session.history.findIndex(item => item.id === itemId);
+  if (historyIndex === -1) return false;
+
+  const [item] = session.history.splice(historyIndex, 1);
+  const targetIndex = Math.max(0, Math.min(toIndex, session.queue.length));
+  session.queue.splice(targetIndex, 0, item);
+  broadcastQueueUpdate(session);
+  return true;
+}
+
+function formatQueueItem(item) {
+  return {
     id: item.id,
     videoId: item.videoId,
     title: item.title,
     thumbnail: item.thumbnail,
     addedBy: item.addedBy,
-  }));
+    artist: item.artist || '',
+    duration: item.duration || '',
+  };
 }
 
 function broadcastQueueUpdate(session) {
   broadcast(session, {
     type: 'QUEUE_UPDATED',
-    queue: getQueueList(session),
+    queue: getQueueState(session),
   });
 }
 
@@ -129,5 +173,10 @@ module.exports = {
   playSelected,
   getNextInQueue,
   getQueueList,
+  getQueueState,
+  archiveCurrentVideo,
+  getPreviousTrack,
+  requeueHistoryItem,
+  broadcastQueueUpdate,
   parseYouTubeUrl,
 };
