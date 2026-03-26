@@ -24,6 +24,15 @@ const App = (() => {
   let searchIsLoading = false;
   let selectedSearchResult = null;
   let pendingControlTransfer = null;
+  let roomPlaybackState = 'idle';
+  let roomCurrentVideoId = null;
+  let roomReferenceTime = 0;
+  let roomReferenceStartedAt = null;
+  let playbackUnlockTimer = null;
+  let hasPlaybackUnlock = false;
+  const SEARCH_DEBOUNCE_MS = 550;
+  const MIN_SEARCH_CHARS = 3;
+  const searchCache = new Map();
 
   // ---- Init ----
 
@@ -33,6 +42,7 @@ const App = (() => {
     Participants.init();
     QueueUI.init();
     SyncClient.init();
+    Chat.init();
 
     // Init particles
     initParticles();
@@ -43,7 +53,6 @@ const App = (() => {
     // Bind UI events
     bindLandingEvents();
     bindSessionEvents();
-    bindPanelTabs();
 
     // Init player with callbacks
     Player.init({
@@ -51,12 +60,19 @@ const App = (() => {
         send({ type: 'PLAYER_READY' });
       },
       onEnded: () => {
-        if (isHost) {
-          send({ type: 'VIDEO_ENDED' });
-        }
+        const reportedVideoId = Player.getCurrentVideoId() || roomCurrentVideoId;
+        if (!reportedVideoId) return;
+
+        send({
+          type: 'VIDEO_ENDED',
+          videoId: reportedVideoId,
+          currentTime: Player.getCurrentTime(),
+          duration: Player.getDuration(),
+        });
       },
       onPlayStateChange: (state) => {
         SyncClient.updatePlayButton(state);
+        handleLocalPlayerStateChange(state);
       },
     });
   }
@@ -126,6 +142,150 @@ const App = (() => {
     updateSearchActionButtons();
     if (typeof QueueUI !== 'undefined' && typeof QueueUI.refreshPermissions === 'function') {
       QueueUI.refreshPermissions();
+    }
+  }
+
+  function deviceNeedsPlaybackUnlock() {
+    return Boolean(
+      window.matchMedia?.('(pointer: coarse)').matches ||
+      navigator.maxTouchPoints > 0 ||
+      /iPhone|iPad|iPod|Android|Mobile/i.test(navigator.userAgent)
+    );
+  }
+
+  function shouldOfferPlaybackUnlock() {
+    return deviceNeedsPlaybackUnlock() && !hasPlaybackUnlock;
+  }
+
+  function markPlaybackUnlocked() {
+    hasPlaybackUnlock = true;
+    clearPlaybackUnlockCheck();
+    hidePlaybackUnlockPrompt();
+  }
+
+  function clearPlaybackUnlockCheck() {
+    if (playbackUnlockTimer) {
+      clearTimeout(playbackUnlockTimer);
+      playbackUnlockTimer = null;
+    }
+  }
+
+  function getExpectedRoomTime() {
+    if (roomPlaybackState !== 'playing') return roomReferenceTime || 0;
+    if (!roomReferenceStartedAt) return roomReferenceTime || 0;
+    const elapsed = Math.max(0, (Date.now() - roomReferenceStartedAt) / 1000);
+    return (roomReferenceTime || 0) + elapsed;
+  }
+
+  function showPlaybackUnlockPrompt() {
+    if (!shouldOfferPlaybackUnlock()) return;
+    if (roomPlaybackState !== 'playing' || !roomCurrentVideoId) return;
+
+    const unlockBtn = document.getElementById('player-unlock-btn');
+    const overlayEl = document.getElementById('player-overlay');
+    if (unlockBtn) {
+      unlockBtn.textContent = isHost ? 'Tap To Start Playback' : 'Tap To Join Live';
+      unlockBtn.classList.remove('hidden');
+    }
+    if (overlayEl) {
+      overlayEl.classList.add('local-unlock-available');
+    }
+  }
+
+  function hidePlaybackUnlockPrompt() {
+    const unlockBtn = document.getElementById('player-unlock-btn');
+    const overlayEl = document.getElementById('player-overlay');
+    if (unlockBtn) unlockBtn.classList.add('hidden');
+    if (overlayEl) overlayEl.classList.remove('local-unlock-available');
+  }
+
+  function schedulePlaybackUnlockCheck(delayMs = 1800) {
+    clearPlaybackUnlockCheck();
+    if (!shouldOfferPlaybackUnlock() || roomPlaybackState !== 'playing' || !roomCurrentVideoId) {
+      hidePlaybackUnlockPrompt();
+      return;
+    }
+
+    playbackUnlockTimer = setTimeout(() => {
+      const state = Player.getState();
+      const playingState = window.YT?.PlayerState?.PLAYING ?? 1;
+      if (roomPlaybackState === 'playing' && roomCurrentVideoId && state !== playingState) {
+        showPlaybackUnlockPrompt();
+      }
+    }, delayMs);
+  }
+
+  function handleLocalPlayerStateChange(state) {
+    if (state === 'playing') {
+      if (shouldOfferPlaybackUnlock() && roomCurrentVideoId) {
+        markPlaybackUnlocked();
+      }
+      clearPlaybackUnlockCheck();
+      hidePlaybackUnlockPrompt();
+      return;
+    }
+
+    if (shouldOfferPlaybackUnlock() && roomPlaybackState === 'playing' && roomCurrentVideoId) {
+      schedulePlaybackUnlockCheck(1200);
+    }
+  }
+
+  function attemptPlaybackUnlock() {
+    if (!shouldOfferPlaybackUnlock()) return;
+    if (roomPlaybackState !== 'playing' || !roomCurrentVideoId) return;
+
+    const targetTime = getExpectedRoomTime();
+    if (Player.getCurrentVideoId() !== roomCurrentVideoId) {
+      Player.loadVideo(roomCurrentVideoId, targetTime);
+    } else {
+      Player.seekTo(targetTime);
+      Player.playVideo();
+    }
+
+    Notifications.success(isHost ? 'Playback started on this device' : 'Joined live session', 2200);
+    hidePlaybackUnlockPrompt();
+    schedulePlaybackUnlockCheck(2200);
+  }
+
+  function updateRoomPlaybackContext(type, msg = {}) {
+    switch (type) {
+      case 'PLAY':
+        roomPlaybackState = 'playing';
+        roomCurrentVideoId = msg.videoId || roomCurrentVideoId;
+        roomReferenceTime = typeof msg.startTime === 'number' ? msg.startTime : 0;
+        roomReferenceStartedAt = Date.now();
+        break;
+      case 'RESUME':
+        roomPlaybackState = 'playing';
+        roomReferenceTime = typeof msg.currentTime === 'number' ? msg.currentTime : roomReferenceTime;
+        roomReferenceStartedAt = Date.now() + (msg.delay || 0);
+        break;
+      case 'SEEK':
+        roomReferenceTime = typeof msg.seekTime === 'number' ? msg.seekTime : roomReferenceTime;
+        if (roomPlaybackState === 'playing') {
+          roomReferenceStartedAt = Date.now();
+        }
+        break;
+      case 'PAUSE':
+        roomPlaybackState = 'paused';
+        roomReferenceTime = typeof msg.currentTime === 'number' ? msg.currentTime : roomReferenceTime;
+        roomReferenceStartedAt = null;
+        break;
+      case 'SYNC_TO':
+        roomPlaybackState = 'playing';
+        roomReferenceTime = typeof msg.currentTime === 'number' ? msg.currentTime : roomReferenceTime;
+        roomReferenceStartedAt = Date.now();
+        break;
+      case 'QUEUE_EMPTY':
+        roomPlaybackState = 'idle';
+        roomCurrentVideoId = null;
+        roomReferenceTime = 0;
+        roomReferenceStartedAt = null;
+        clearPlaybackUnlockCheck();
+        hidePlaybackUnlockPrompt();
+        break;
+      default:
+        break;
     }
   }
 
@@ -238,6 +398,22 @@ const App = (() => {
       return;
     }
 
+    if (trimmedQuery.length < MIN_SEARCH_CHARS) {
+      if (!append) {
+        searchQuery = trimmedQuery;
+        searchNextPageToken = null;
+        searchHasMore = false;
+        selectedSearchResult = null;
+        updateSearchActionButtons();
+        if (resultsEl) {
+          resultsEl.innerHTML = '';
+          resultsEl.classList.add('hidden');
+        }
+      }
+      setSearchStatus(`Type at least ${MIN_SEARCH_CHARS} characters to search`);
+      return;
+    }
+
     if (searchIsLoading) return;
     if (!append) {
       if (searchAbortController) searchAbortController.abort();
@@ -248,6 +424,20 @@ const App = (() => {
     }
 
     searchQuery = trimmedQuery;
+    const cacheKey = `${trimmedQuery.toLowerCase()}::${append ? searchNextPageToken || '' : ''}`;
+    if (searchCache.has(cacheKey)) {
+      const cached = searchCache.get(cacheKey);
+      renderSearchResults(cached.items || [], append);
+      searchNextPageToken = cached.nextPageToken || null;
+      searchHasMore = Boolean(cached.nextPageToken);
+      setSearchStatus(
+        cached.items?.length
+          ? 'Select a result to queue it or play it next'
+          : 'No results found'
+      );
+      return;
+    }
+
     searchAbortController = new AbortController();
     setSearchLoading(true);
     setSearchStatus(append ? 'Loading more results...' : 'Searching YouTube...');
@@ -267,6 +457,10 @@ const App = (() => {
         throw new Error(data?.error || 'Search unavailable right now');
       }
 
+      searchCache.set(cacheKey, {
+        items: data.items || [],
+        nextPageToken: data.nextPageToken || null,
+      });
       renderSearchResults(data.items || [], append);
       searchNextPageToken = data.nextPageToken || null;
       searchHasMore = Boolean(data.nextPageToken);
@@ -471,6 +665,7 @@ const App = (() => {
         Notifications.info('Someone left the session');
         break;
       case 'QUEUE_EMPTY':
+        updateRoomPlaybackContext('QUEUE_EMPTY');
         Notifications.info('Queue is empty — add more songs!');
         Player.showPlaceholder();
         SyncClient.updatePlayButton('paused');
@@ -482,14 +677,27 @@ const App = (() => {
       case 'ERROR':
         Notifications.error(msg.message);
         break;
+      case 'CHAT_MESSAGE':
+        Chat.handleMessage(msg);
+        break;
 
-      // Sync messages → delegate to SyncClient
       case 'CUE_VIDEO':
+        if (msg.videoId) roomCurrentVideoId = msg.videoId;
+        SyncClient.handleMessage(msg);
+        break;
       case 'PLAY':
       case 'SEEK':
       case 'PAUSE':
       case 'RESUME':
       case 'SYNC_TO':
+        updateRoomPlaybackContext(msg.type, msg);
+        SyncClient.handleMessage(msg);
+        if (shouldOfferPlaybackUnlock() && roomPlaybackState === 'playing') {
+          schedulePlaybackUnlockCheck();
+        } else {
+          hidePlaybackUnlockPrompt();
+        }
+        break;
       case 'LAG_INFO':
         SyncClient.handleMessage(msg);
         break;
@@ -500,6 +708,8 @@ const App = (() => {
     userId = msg.userId;
     sessionCode = msg.code;
     username = msg.username;
+    Chat.setSessionContext({ userId, username, sessionCode });
+    if (msg.chat) Chat.setHistory(msg.chat);
 
     switchToSessionView(msg.code, msg.username);
     syncParticipantsState(msg.participants || []);
@@ -510,6 +720,8 @@ const App = (() => {
     userId = msg.userId;
     sessionCode = msg.code;
     username = msg.username;
+    Chat.setSessionContext({ userId, username, sessionCode });
+    if (msg.chat) Chat.setHistory(msg.chat);
 
     switchToSessionView(msg.code, msg.username);
     syncParticipantsState(msg.participants || []);
@@ -520,6 +732,12 @@ const App = (() => {
     // Full state from server on join
     if (msg.queue) QueueUI.update(msg.queue);
     if (msg.participants) syncParticipantsState(msg.participants);
+    if (msg.chat) Chat.setHistory(msg.chat);
+
+    roomCurrentVideoId = msg.currentVideo?.videoId || null;
+    roomPlaybackState = msg.playbackState || 'idle';
+    roomReferenceTime = typeof msg.currentTime === 'number' ? msg.currentTime : 0;
+    roomReferenceStartedAt = roomPlaybackState === 'playing' ? Date.now() : null;
 
     // If there's a current video, sync to it
     if (msg.currentVideo && msg.playbackState !== 'idle') {
@@ -533,6 +751,12 @@ const App = (() => {
         Player.cueVideo(msg.currentVideo.videoId, msg.currentTime || 0);
         SyncClient.updatePlayButton('paused');
       }
+    }
+
+    if (shouldOfferPlaybackUnlock() && roomPlaybackState === 'playing' && roomCurrentVideoId) {
+      schedulePlaybackUnlockCheck();
+    } else {
+      hidePlaybackUnlockPrompt();
     }
   }
 
@@ -654,6 +878,7 @@ const App = (() => {
     const transferModal = document.getElementById('control-transfer-modal');
     const transferCancelBtn = document.getElementById('control-transfer-cancel');
     const transferConfirmBtn = document.getElementById('control-transfer-confirm');
+    const unlockBtn = document.getElementById('player-unlock-btn');
 
     refreshControllerAccess();
 
@@ -693,12 +918,18 @@ const App = (() => {
         if (searchDebounce) clearTimeout(searchDebounce);
         searchDebounce = setTimeout(() => {
           runSongSearch(query);
-        }, 350);
+        }, SEARCH_DEBOUNCE_MS);
       });
 
       searchInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && selectedSearchResult) {
-          addBtn.click();
+        if (e.key === 'Enter') {
+          if (selectedSearchResult) {
+            addBtn.click();
+            return;
+          }
+
+          if (searchDebounce) clearTimeout(searchDebounce);
+          runSongSearch(searchInput.value);
         }
       });
     }
@@ -718,12 +949,17 @@ const App = (() => {
     // Play/pause button (host only)
     const playPauseBtn = document.getElementById('play-pause-btn');
     playPauseBtn.addEventListener('click', () => {
+      const playingState = window.YT?.PlayerState?.PLAYING ?? 1;
       if (!isHost) {
+        if (shouldOfferPlaybackUnlock() && roomPlaybackState === 'playing' && roomCurrentVideoId && Player.getState() !== playingState) {
+          attemptPlaybackUnlock();
+          return;
+        }
         Notifications.info('Only the controller can control playback');
         return;
       }
       const state = Player.getState();
-      if (state === YT.PlayerState.PLAYING) {
+      if (state === playingState) {
         Player.pauseVideo();
         send({ type: 'PAUSE' });
       } else {
@@ -756,49 +992,12 @@ const App = (() => {
     }
 
 
-    // Player Overlay (blocks iframe clicks)
-    const playerOverlay = document.getElementById('player-overlay');
-    if (playerOverlay) {
-      playerOverlay.addEventListener('click', () => {
-        if (!isHost) {
-          Notifications.info('Only the controller can control playback');
-          return;
-        }
-        const state = Player.getState();
-        if (state === YT.PlayerState.PLAYING) {
-          Player.pauseVideo();
-          send({ type: 'PAUSE' });
-        } else {
-          const time = Player.getCurrentTime();
-          Player.playVideo();
-          send({ type: 'RESUME', currentTime: time });
-        }
+    if (unlockBtn) {
+      unlockBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        attemptPlaybackUnlock();
       });
     }
-  }
-
-  // ---- Panel Tabs ----
-
-  function bindPanelTabs() {
-    const tabs = document.querySelectorAll('.panel-tab');
-    const queuePanel = document.getElementById('queue-panel');
-    const participantsPanel = document.getElementById('participants-panel');
-
-    tabs.forEach(tab => {
-      tab.addEventListener('click', () => {
-        tabs.forEach(t => t.classList.remove('active'));
-        tab.classList.add('active');
-
-        const target = tab.dataset.tab;
-        if (target === 'queue') {
-          queuePanel.classList.remove('hidden');
-          participantsPanel.classList.add('hidden');
-        } else {
-          queuePanel.classList.add('hidden');
-          participantsPanel.classList.remove('hidden');
-        }
-      });
-    });
   }
 
   // ---- Particle Background ----
@@ -897,6 +1096,7 @@ const App = (() => {
     init,
     getIsHost: () => isHost,
     openTransferControls,
+    attemptPlaybackUnlock,
   };
 })();
 

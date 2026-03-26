@@ -31,16 +31,22 @@ const Player = (() => {
   }
 
   function createPlayer() {
+    const currentOrigin = window.location.origin;
+    const widgetReferrer = window.location.href;
     player = new YT.Player('youtube-player', {
       height: '100%',
       width: '100%',
+      host: 'https://www.youtube.com',
       playerVars: {
         autoplay: 0,
         controls: 0,
+        enablejsapi: 1,
         modestbranding: 1,
         rel: 0,
         fs: 0,
         playsinline: 1,
+        origin: currentOrigin,
+        widget_referrer: widgetReferrer,
       },
       events: {
         onReady: handleReady,
@@ -99,7 +105,19 @@ const Player = (() => {
   }
 
   function handleError(event) {
-    console.error('YouTube Player Error:', event.data);
+    const errorCode = Number(event.data);
+    console.error('YouTube Player Error:', errorCode);
+
+    if (errorCode === 101 || errorCode === 150) {
+      Notifications.error('This video is blocked from playing inside embedded players on this device');
+      return;
+    }
+
+    if (errorCode === 5) {
+      Notifications.error('This video cannot be played in the embedded player right now');
+      return;
+    }
+
     Notifications.error('Video playback error');
   }
 
@@ -156,6 +174,10 @@ const Player = (() => {
   function getState() {
     if (!player || !isReady) return -1;
     return player.getPlayerState();
+  }
+
+  function getCurrentVideoId() {
+    return currentVideoId;
   }
 
   function startTimeReporting() {
@@ -221,6 +243,7 @@ const Player = (() => {
     getCurrentTime,
     getDuration,
     getState,
+    getCurrentVideoId,
     playWithDelay,
     showPlaceholder,
     hidePlaceholder,

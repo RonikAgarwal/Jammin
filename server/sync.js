@@ -5,6 +5,7 @@ const {
   broadcast,
   sendTo,
   getParticipantList,
+  getChatHistory,
 } = require('./session');
 const {
   getNextInQueue,
@@ -47,9 +48,23 @@ function handlePlayerReady(session, userId) {
   return { session, userId };
 }
 
-function handleVideoEnded(session, userId) {
-  if (session.host !== userId) return;
+function handleVideoEnded(session, userId, report = {}) {
   if (session.playbackState !== 'playing') return;
+  if (!session.currentVideo) return;
+
+  const isCurrentController = session.host === userId;
+  const participantCount = session.participants?.size || 0;
+  const reportedVideoId = typeof report.videoId === 'string' ? report.videoId : '';
+  const reportedTime = Number(report.currentTime);
+  const reportedDuration = Number(report.duration);
+  const isNearReportedEnd =
+    Number.isFinite(reportedTime) &&
+    Number.isFinite(reportedDuration) &&
+    reportedDuration > 0 &&
+    reportedTime >= Math.max(0, reportedDuration - 2.5);
+
+  if (reportedVideoId && reportedVideoId !== session.currentVideo.videoId) return;
+  if (!isCurrentController && participantCount > 1 && !isNearReportedEnd) return;
 
   session.playbackState = 'idle';
   session.referenceTime = 0;
@@ -130,6 +145,7 @@ function handleNewJoin(session, userId) {
     currentTime: currentRef,
     queue: getQueueState(session),
     participants: getParticipantList(session),
+    chat: getChatHistory(session),
     vibeSource: session.vibeSource,
   });
 }

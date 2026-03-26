@@ -9,10 +9,13 @@ const QueueUI = (() => {
     history: [],
   };
   let dragState = null;
+  let openMenuEl = null;
+  let hasBoundGlobalMenuListeners = false;
 
   function init() {
     listEl = document.getElementById('queue-list');
     emptyEl = document.getElementById('queue-empty');
+    bindGlobalMenuListeners();
   }
 
   function update(nextState) {
@@ -30,6 +33,7 @@ const QueueUI = (() => {
 
     render();
     updateTransportControls();
+    closeOpenMenu();
   }
 
   function render() {
@@ -122,12 +126,22 @@ const QueueUI = (() => {
         <div class="queue-row-meta">${escapeHtml(formatMeta(item))}</div>
       </div>
       <span class="queue-status-muted">Played</span>
+      ${isHost ? createRowMenuHtml([
+        { action: 'requeue', label: 'Queue next' },
+      ]) : ''}
     `;
 
     bindDraggableRow(el, {
       kind: 'history',
       itemId: item.id,
       isHost,
+    });
+    bindRowMenu(el, {
+      requeue: () => {
+        if (window.App) {
+          App.send({ type: 'REQUEUE_HISTORY_ITEM', itemId: item.id, toIndex: 0 });
+        }
+      },
     });
 
     return el;
@@ -151,8 +165,10 @@ const QueueUI = (() => {
       </div>
       ${isHost ? `
         <div class="queue-row-actions">
-          <button class="queue-row-btn play-btn" title="Play now">▶</button>
-          <button class="queue-row-btn remove-btn" title="Remove">✕</button>
+          ${createRowMenuHtml([
+            { action: 'play-now', label: 'Play now' },
+            { action: 'remove', label: 'Remove' },
+          ])}
         </div>
       ` : ''}
     `;
@@ -173,21 +189,15 @@ const QueueUI = (() => {
   }
 
   function bindUpcomingRow(el, item, index, isHost) {
-    const playBtn = el.querySelector('.play-btn');
-    if (playBtn) {
-      playBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
+    if (!isHost) return;
+    bindRowMenu(el, {
+      'play-now': () => {
         if (window.App) App.send({ type: 'PLAY_SELECTED', itemId: item.id });
-      });
-    }
-
-    const removeBtn = el.querySelector('.remove-btn');
-    if (removeBtn) {
-      removeBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
+      },
+      remove: () => {
         if (window.App) App.send({ type: 'REMOVE_FROM_QUEUE', itemId: item.id });
-      });
-    }
+      },
+    });
   }
 
   function bindDraggableRow(el, config) {
@@ -302,6 +312,94 @@ const QueueUI = (() => {
     window.removeEventListener('pointercancel', handlePointerCancel);
   }
 
+  function bindGlobalMenuListeners() {
+    if (hasBoundGlobalMenuListeners) return;
+    hasBoundGlobalMenuListeners = true;
+
+    if (listEl) {
+      listEl.addEventListener('scroll', () => {
+        closeOpenMenu();
+      });
+    }
+
+    document.addEventListener('click', (e) => {
+      if (!openMenuEl) return;
+      if (openMenuEl.contains(e.target)) return;
+      closeOpenMenu();
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        closeOpenMenu();
+      }
+    });
+
+    window.addEventListener('resize', closeOpenMenu);
+  }
+
+  function bindRowMenu(el, actions) {
+    const menuWrap = el.querySelector('.queue-row-menu');
+    const trigger = el.querySelector('.queue-row-menu-trigger');
+    if (!menuWrap || !trigger) return;
+
+    trigger.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (openMenuEl && openMenuEl !== menuWrap) {
+        closeOpenMenu();
+      }
+
+      const isOpen = menuWrap.classList.toggle('open');
+      el.classList.toggle('menu-open', isOpen);
+      if (isOpen) {
+        positionRowMenu(menuWrap);
+      } else {
+        menuWrap.classList.remove('open-upward');
+      }
+      trigger.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+      openMenuEl = isOpen ? menuWrap : null;
+    });
+
+    menuWrap.querySelectorAll('.queue-row-menu-item').forEach((button) => {
+      button.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const action = button.dataset.action;
+        closeOpenMenu();
+        if (action && typeof actions[action] === 'function') {
+          actions[action]();
+        }
+      });
+    });
+  }
+
+  function closeOpenMenu() {
+    if (!openMenuEl) return;
+    const trigger = openMenuEl.querySelector('.queue-row-menu-trigger');
+    const row = openMenuEl.closest('.queue-row');
+    openMenuEl.classList.remove('open');
+    openMenuEl.classList.remove('open-upward');
+    if (row) row.classList.remove('menu-open');
+    if (trigger) trigger.setAttribute('aria-expanded', 'false');
+    openMenuEl = null;
+  }
+
+  function positionRowMenu(menuWrap) {
+    const popover = menuWrap.querySelector('.queue-row-menu-popover');
+    if (!popover) return;
+
+    menuWrap.classList.remove('open-upward');
+
+    const popoverRect = popover.getBoundingClientRect();
+    const containerRect = listEl?.getBoundingClientRect();
+    const lowerBoundary = containerRect ? Math.min(containerRect.bottom, window.innerHeight) : window.innerHeight;
+    const upperBoundary = containerRect ? Math.max(containerRect.top, 0) : 0;
+    const spaceBelow = lowerBoundary - popoverRect.top;
+    const spaceAbove = popoverRect.bottom - upperBoundary;
+
+    if (spaceBelow < popoverRect.height + 12 && spaceAbove > spaceBelow) {
+      menuWrap.classList.add('open-upward');
+    }
+  }
+
   function createHelperCard(title, body) {
     const el = document.createElement('div');
     el.className = 'queue-helper-card';
@@ -339,6 +437,27 @@ const QueueUI = (() => {
 
   function dragHandle() {
     return '<span class="queue-drag-lines"><span></span><span></span><span></span></span>';
+  }
+
+  function createRowMenuHtml(options) {
+    const items = options
+      .map((option) => `
+        <button class="queue-row-menu-item" type="button" data-action="${escapeHtml(option.action)}">
+          ${escapeHtml(option.label)}
+        </button>
+      `)
+      .join('');
+
+    return `
+      <div class="queue-row-menu">
+        <button class="queue-row-menu-trigger" type="button" aria-haspopup="menu" aria-expanded="false" title="More options">
+          <span></span><span></span><span></span>
+        </button>
+        <div class="queue-row-menu-popover" role="menu">
+          ${items}
+        </div>
+      </div>
+    `;
   }
 
   function historyIcon() {

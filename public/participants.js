@@ -14,15 +14,49 @@ const Participants = (() => {
 
   let listEl = null;
   let controllerEl = null;
+  let triggerBtnEl = null;
+  let triggerCountEl = null;
+  let triggerSubtitleEl = null;
+  let sheetEl = null;
+  let backdropEl = null;
+  let closeBtnEl = null;
   let currentParticipants = [];
   let currentOptions = {
     currentUserId: null,
     canPassControls: false,
   };
+  let isOpen = false;
 
   function init() {
     listEl = document.getElementById('participants-list');
     controllerEl = document.getElementById('controller-text');
+    triggerBtnEl = document.getElementById('room-people-btn');
+    triggerCountEl = document.getElementById('room-people-count');
+    triggerSubtitleEl = document.getElementById('room-people-subtitle');
+    sheetEl = document.getElementById('participants-sheet');
+    backdropEl = document.getElementById('participants-backdrop');
+    closeBtnEl = document.getElementById('participants-sheet-close');
+
+    if (sheetEl) sheetEl.classList.remove('hidden');
+    if (backdropEl) backdropEl.classList.remove('hidden');
+
+    if (triggerBtnEl) {
+      triggerBtnEl.addEventListener('click', togglePanel);
+    }
+
+    if (closeBtnEl) {
+      closeBtnEl.addEventListener('click', closePanel);
+    }
+
+    if (backdropEl) {
+      backdropEl.addEventListener('click', closePanel);
+    }
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && isOpen) {
+        closePanel();
+      }
+    });
   }
 
   function update(participants, options = {}) {
@@ -33,6 +67,7 @@ const Participants = (() => {
       canPassControls: Boolean(options.canPassControls),
     };
 
+    updateTriggerSummary();
     listEl.innerHTML = '';
 
     const displayParticipants = currentParticipants
@@ -91,6 +126,55 @@ const Participants = (() => {
     }
   }
 
+  function updateTriggerSummary() {
+    const count = currentParticipants.length;
+    const controller = currentParticipants.find((participant) => participant.isHost);
+
+    if (triggerCountEl) {
+      triggerCountEl.textContent = String(count || 0);
+    }
+
+    if (!triggerSubtitleEl) return;
+
+    if (controller) {
+      triggerSubtitleEl.textContent = controller.userId === currentOptions.currentUserId
+        ? `You + ${Math.max(count - 1, 0)} others`
+        : `${controller.username} has control`;
+      return;
+    }
+
+    triggerSubtitleEl.textContent = count ? `${count} in the room` : 'Room presence';
+  }
+
+  function togglePanel() {
+    if (isOpen) {
+      closePanel();
+    } else {
+      openPanel();
+    }
+  }
+
+  function openPanel() {
+    if (!sheetEl || !triggerBtnEl) return;
+
+    if (window.Chat && typeof window.Chat.close === 'function') {
+      window.Chat.close();
+    }
+
+    isOpen = true;
+    sheetEl.classList.add('open');
+    backdropEl?.classList.add('visible');
+    triggerBtnEl.setAttribute('aria-expanded', 'true');
+  }
+
+  function closePanel() {
+    if (!sheetEl || !triggerBtnEl) return;
+    isOpen = false;
+    sheetEl.classList.remove('open');
+    backdropEl?.classList.remove('visible');
+    triggerBtnEl.setAttribute('aria-expanded', 'false');
+  }
+
   function getStatusText(status) {
     switch (status) {
       case 'in-sync': return 'In sync';
@@ -107,5 +191,7 @@ const Participants = (() => {
     return div.innerHTML;
   }
 
-  return { init, update };
+  return { init, update, openPanel, closePanel, isOpen: () => isOpen };
 })();
+
+window.Participants = Participants;

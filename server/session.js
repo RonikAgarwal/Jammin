@@ -1,6 +1,7 @@
 // Session & Room Management
 
 const sessions = new Map();
+const MAX_CHAT_MESSAGES = 100;
 
 function generateCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -25,6 +26,7 @@ function createSession(ws, username) {
     host: userId,
     participants: new Map([[userId, participant]]),
     queue: [],
+    chat: [],
     currentVideo: null,
     history: [],
     playbackState: 'idle', // idle | cueing | playing | paused
@@ -132,6 +134,27 @@ function getParticipantList(session) {
   return list;
 }
 
+function addChatMessage(session, { userId, username, text }) {
+  const message = {
+    id: createMessageId(),
+    userId,
+    username: (username || 'Anonymous').slice(0, 20),
+    text,
+    sentAt: Date.now(),
+  };
+
+  session.chat.push(message);
+  if (session.chat.length > MAX_CHAT_MESSAGES) {
+    session.chat.splice(0, session.chat.length - MAX_CHAT_MESSAGES);
+  }
+
+  return message;
+}
+
+function getChatHistory(session) {
+  return Array.isArray(session.chat) ? session.chat.slice() : [];
+}
+
 function transferHost(session, nextHostUserId, previousHostId = session.host) {
   const nextHostParticipant = session.participants.get(nextHostUserId);
   if (!nextHostParticipant) return null;
@@ -157,6 +180,10 @@ function generateUserId() {
   return 'u_' + Math.random().toString(36).substring(2, 10);
 }
 
+function createMessageId() {
+  return 'm_' + Math.random().toString(36).substring(2, 10);
+}
+
 function createParticipant(ws, userId, username, isHost) {
   return {
     ws,
@@ -166,6 +193,7 @@ function createParticipant(ws, userId, username, isHost) {
     status: 'in-sync', // in-sync | behind | away | unstable
     lastReportedTime: 0,
     lagHistory: [],
+    lastChatAt: 0,
   };
 }
 
@@ -179,5 +207,7 @@ module.exports = {
   broadcast,
   sendTo,
   getParticipantList,
+  addChatMessage,
+  getChatHistory,
   transferHost,
 };

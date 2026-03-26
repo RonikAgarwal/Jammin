@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description" content="Jammin — Listen to YouTube music together in real-time with friends. A shared vibe experience.">
+  <meta name="referrer" content="origin">
   <title>Jammin — Listen Together</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -70,6 +71,23 @@
           <span class="status-dot"></span>
           <span class="status-text">Connected</span>
         </div>
+        <button class="room-people-btn glass-pill" id="room-people-btn" type="button" aria-expanded="false" aria-controls="participants-sheet" title="Open people">
+          <span class="room-people-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M16 21v-1.2c0-2.3-2-4.2-4.5-4.2S7 17.5 7 19.8V21"></path>
+              <path d="M12 12.6a3.3 3.3 0 1 0 0-6.6 3.3 3.3 0 0 0 0 6.6Z"></path>
+              <path d="M20 20.5v-1c0-1.8-1.4-3.2-3.2-3.5"></path>
+              <path d="M17 6.5a3 3 0 0 1 0 5.9"></path>
+              <path d="M4 20.5v-1c0-1.8 1.4-3.2 3.2-3.5"></path>
+              <path d="M7 6.5a3 3 0 0 0 0 5.9"></path>
+            </svg>
+          </span>
+          <span class="room-people-copy">
+            <span class="room-people-label">People</span>
+            <span class="room-people-subtitle" id="room-people-subtitle">Room presence</span>
+          </span>
+          <span class="room-people-count" id="room-people-count">1</span>
+        </button>
       </div>
     </header>
 
@@ -81,6 +99,7 @@
           <div id="player-container">
             <div id="youtube-player"></div>
             <div id="player-overlay" class="player-overlay"></div>
+            <button id="player-unlock-btn" class="player-unlock-btn hidden" type="button">Tap To Join Live</button>
             <div id="player-placeholder" class="player-placeholder">
               <div class="placeholder-content">
                 <span class="placeholder-icon">🎵</span>
@@ -132,14 +151,12 @@
 
       <!-- Side Panel -->
       <aside class="side-panel">
-        <!-- Tabs -->
-        <div class="panel-tabs">
-          <button class="panel-tab active" data-tab="queue">Queue</button>
-          <button class="panel-tab" data-tab="participants">Vibers</button>
-        </div>
-
         <!-- Queue Panel -->
-        <div class="panel-content" id="queue-panel">
+        <div class="panel-shell">
+          <div class="panel-shell-head">
+            <div class="panel-shell-title">Queue</div>
+            <div class="panel-shell-subtitle">Line up the next vibe</div>
+          </div>
           <div class="queue-list" id="queue-list">
             <div class="queue-empty" id="queue-empty">
               <span class="empty-icon">🎶</span>
@@ -148,16 +165,26 @@
             </div>
           </div>
         </div>
-
-        <!-- Participants Panel -->
-        <div class="panel-content hidden" id="participants-panel">
-          <div class="participants-list" id="participants-list"></div>
-          <div class="vibe-controller" id="vibe-controller">
-            <span id="controller-text">No one is controlling the vibe</span>
-          </div>
-        </div>
       </aside>
     </main>
+
+    <div class="participants-backdrop hidden" id="participants-backdrop"></div>
+    <aside class="participants-sheet glass-panel hidden" id="participants-sheet" aria-label="Room vibers">
+      <div class="participants-sheet-handle"></div>
+      <div class="participants-sheet-header">
+        <div class="participants-sheet-heading">
+          <span class="participants-sheet-kicker">Room People</span>
+          <h3>Who is here right now</h3>
+        </div>
+        <button class="participants-sheet-close" id="participants-sheet-close" type="button" aria-label="Close vibers">✕</button>
+      </div>
+      <div class="participants-sheet-body">
+        <div class="participants-list" id="participants-list"></div>
+      </div>
+      <div class="vibe-controller" id="vibe-controller">
+        <span id="controller-text">No one is controlling the vibe</span>
+      </div>
+    </aside>
 
     <!-- Notification Area -->
     <div class="notification-area" id="notification-area"></div>
@@ -167,6 +194,57 @@
       <span class="sync-message" id="sync-message"></span>
       <button class="btn btn-live" id="go-live-btn">Go Live</button>
     </div>
+
+    <button class="chat-launcher glass-panel hidden" id="chat-launcher" type="button" aria-expanded="false" aria-controls="chat-drawer">
+      <span class="chat-launcher-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M7 18.5c-2.8 0-5-1.9-5-4.5s2.2-4.5 5-4.5h10c2.8 0 5 1.9 5 4.5s-2.2 4.5-5 4.5H11l-4.5 3z"></path>
+          <path d="M8 13.5h.01"></path>
+          <path d="M12 13.5h.01"></path>
+          <path d="M16 13.5h.01"></path>
+        </svg>
+      </span>
+      <span class="chat-launcher-copy">
+        <span class="chat-launcher-title">Chat</span>
+        <span class="chat-launcher-subtitle" id="chat-launcher-subtitle">Say something to the room</span>
+      </span>
+      <span class="chat-launcher-badge hidden" id="chat-launcher-badge">0</span>
+    </button>
+
+    <aside class="chat-drawer glass-panel hidden" id="chat-drawer" aria-label="Room chat">
+      <div class="chat-drawer-header">
+        <div class="chat-drawer-heading">
+          <span class="chat-drawer-kicker">Room Chat</span>
+          <h3>Live between vibers</h3>
+        </div>
+        <button class="chat-close-btn" id="chat-close-btn" type="button" aria-label="Close chat">✕</button>
+      </div>
+
+      <div class="chat-message-list" id="chat-message-list">
+        <div class="chat-empty-state" id="chat-empty-state">
+          <span class="chat-empty-icon">✦</span>
+          <div class="chat-empty-title">Start the side chatter</div>
+          <div class="chat-empty-copy">Drop a note, react to the track, or tell the room what to queue next.</div>
+        </div>
+      </div>
+
+      <form class="chat-compose" id="chat-compose-form">
+        <div class="chat-compose-shell">
+          <input
+            type="text"
+            id="chat-input"
+            maxlength="320"
+            autocomplete="off"
+            placeholder="Send a vibe, a reaction, or the next idea..."
+          >
+          <button class="btn btn-accent chat-send-btn" id="chat-send-btn" type="submit">Send</button>
+        </div>
+        <div class="chat-compose-meta">
+          <span id="chat-compose-hint">Everyone in the room can see this.</span>
+          <span id="chat-character-count">0 / 320</span>
+        </div>
+      </form>
+    </aside>
   </div>
 
   <div class="control-transfer-modal hidden" id="control-transfer-modal">
@@ -192,6 +270,7 @@
   <script src="player.js"></script>
   <script src="queue-ui.js"></script>
   <script src="sync-client.js"></script>
+  <script src="chat.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
