@@ -3,6 +3,9 @@ const express = require('express');
 const http = require('http');
 const { WebSocketServer } = require('ws');
 const path = require('path');
+const fs = require('fs');
+
+loadEnvFile(path.join(__dirname, '..', '.env'));
 
 const {
   createSession,
@@ -50,6 +53,94 @@ const wss = new WebSocketServer({ server });
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 const PORT = process.env.PORT || 3000;
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || '';
+
+function loadEnvFile(filePath) {
+  if (!fs.existsSync(filePath)) return;
+
+  const raw = fs.readFileSync(filePath, 'utf8');
+  raw.split(/\r?\n/).forEach((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) return;
+
+    const separatorIndex = trimmed.indexOf('=');
+    if (separatorIndex === -1) return;
+
+    const key = trimmed.slice(0, separatorIndex).trim();
+    if (!key || process.env[key]) return;
+
+    let value = trimmed.slice(separatorIndex + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+
+    process.env[key] = value;
+  });
+}
+
+app.get('/api/youtube/search', async (req, res) => {
+  const query = String(req.query.q || '').trim();
+  const pageToken = String(req.query.pageToken || '').trim();
+
+  if (!YOUTUBE_API_KEY) {
+    return res.status(503).json({
+      error: 'YouTube search is not configured on the server.',
+      code: 'youtube_api_key_missing',
+    });
+  }
+
+  if (!query) {
+    return res.json({ items: [], nextPageToken: null });
+  }
+
+  try {
+    const params = new URLSearchParams({
+      part: 'snippet',
+      type: 'video',
+      videoEmbeddable: 'true',
+      maxResults: '5',
+      q: query,
+      key: YOUTUBE_API_KEY,
+    });
+
+    if (pageToken) params.set('pageToken', pageToken);
+
+    const response = await fetch(`https://www.googleapis.com/youtube/v3/search?${params.toString()}`);
+    const data = await response.json();
+
+    if (!response.ok) {
+      return res.status(response.status).json({
+        error: data?.error?.message || 'Failed to search YouTube.',
+        code: 'youtube_search_failed',
+      });
+    }
+
+    const items = (data.items || [])
+      .filter((item) => item.id?.videoId)
+      .map((item) => ({
+        videoId: item.id.videoId,
+        title: item.snippet?.title || 'Untitled',
+        channelTitle: item.snippet?.channelTitle || '',
+        thumbnail:
+          item.snippet?.thumbnails?.medium?.url ||
+          item.snippet?.thumbnails?.default?.url ||
+          `https://img.youtube.com/vi/${item.id.videoId}/mqdefault.jpg`,
+      }));
+
+    return res.json({
+      items,
+      nextPageToken: data.nextPageToken || null,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: 'Unable to reach YouTube search right now.',
+      code: 'youtube_search_unavailable',
+    });
+  }
+});
 
 // WebSocket connection handler
 wss.on('connection', (ws) => {

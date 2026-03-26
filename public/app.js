@@ -16,6 +16,13 @@ const App = (() => {
   let lastSentSeekTime = null;
   let lastSentSeekAt = 0;
   let stopParticlesAnimation = null;
+  let searchAbortController = null;
+  let searchDebounce = null;
+  let searchQuery = '';
+  let searchNextPageToken = null;
+  let searchHasMore = false;
+  let searchIsLoading = false;
+  let selectedSearchResult = null;
 
   // ---- Init ----
 
@@ -78,6 +85,182 @@ const App = (() => {
     const m = Math.floor(s / 60);
     const remS = s % 60;
     return `${m}:${remS.toString().padStart(2, '0')}`;
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str || '';
+    return div.innerHTML;
+  }
+
+  function setSearchStatus(message) {
+    const statusEl = document.getElementById('song-search-status');
+    if (statusEl) statusEl.textContent = message;
+  }
+
+  function setSearchLoading(loading) {
+    searchIsLoading = loading;
+    const resultsEl = document.getElementById('song-search-results');
+    if (resultsEl) resultsEl.dataset.loading = loading ? 'true' : 'false';
+  }
+
+  function updateSearchActionButtons() {
+    const addBtn = document.getElementById('add-queue-btn');
+    const playNextBtn = document.getElementById('play-next-btn');
+    if (addBtn) addBtn.disabled = !selectedSearchResult;
+    if (playNextBtn) playNextBtn.disabled = !selectedSearchResult || !isHost;
+  }
+
+  function resetSearchSelection({ preserveQuery = false } = {}) {
+    selectedSearchResult = null;
+    updateSearchActionButtons();
+
+    const resultsEl = document.getElementById('song-search-results');
+    if (resultsEl) {
+      resultsEl.querySelectorAll('.song-search-result.selected').forEach((el) => {
+        el.classList.remove('selected');
+      });
+    }
+
+    if (!preserveQuery) {
+      const input = document.getElementById('song-search-input');
+      const results = document.getElementById('song-search-results');
+      if (input) input.value = '';
+      if (results) {
+        results.innerHTML = '';
+        results.classList.add('hidden');
+      }
+      searchQuery = '';
+      searchNextPageToken = null;
+      searchHasMore = false;
+      setSearchStatus('Start typing to search');
+    }
+  }
+
+  function renderSearchResults(items, append = false) {
+    const resultsEl = document.getElementById('song-search-results');
+    if (!resultsEl) return;
+
+    if (!append) {
+      resultsEl.innerHTML = '';
+    }
+
+    if (!append && items.length === 0) {
+      resultsEl.classList.add('hidden');
+      return;
+    }
+
+    resultsEl.classList.remove('hidden');
+
+    items.forEach((item) => {
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'song-search-result';
+      if (selectedSearchResult?.videoId === item.videoId) {
+        card.classList.add('selected');
+      }
+      card.innerHTML = `
+        <img class="song-search-thumb" src="${item.thumbnail}" alt="" loading="lazy">
+        <div class="song-search-copy">
+          <div class="song-search-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</div>
+          <div class="song-search-meta">${escapeHtml(item.channelTitle || 'YouTube')}</div>
+        </div>
+      `;
+
+      card.addEventListener('click', () => {
+        selectedSearchResult = item;
+        updateSearchActionButtons();
+        resultsEl.querySelectorAll('.song-search-result.selected').forEach((el) => {
+          el.classList.remove('selected');
+        });
+        card.classList.add('selected');
+        setSearchStatus(`Selected: ${item.title}`);
+      });
+
+      resultsEl.appendChild(card);
+    });
+  }
+
+  async function runSongSearch(query, { append = false } = {}) {
+    const trimmedQuery = query.trim();
+    const resultsEl = document.getElementById('song-search-results');
+
+    if (!trimmedQuery) {
+      if (searchAbortController) searchAbortController.abort();
+      searchQuery = '';
+      searchNextPageToken = null;
+      searchHasMore = false;
+      resetSearchSelection({ preserveQuery: true });
+      if (resultsEl) {
+        resultsEl.innerHTML = '';
+        resultsEl.classList.add('hidden');
+      }
+      setSearchStatus('Start typing to search');
+      return;
+    }
+
+    if (searchIsLoading) return;
+    if (!append) {
+      if (searchAbortController) searchAbortController.abort();
+      searchNextPageToken = null;
+      searchHasMore = false;
+      selectedSearchResult = null;
+      updateSearchActionButtons();
+    }
+
+    searchQuery = trimmedQuery;
+    searchAbortController = new AbortController();
+    setSearchLoading(true);
+    setSearchStatus(append ? 'Loading more results...' : 'Searching YouTube...');
+
+    try {
+      const params = new URLSearchParams({ q: trimmedQuery });
+      if (append && searchNextPageToken) {
+        params.set('pageToken', searchNextPageToken);
+      }
+
+      const response = await fetch(`/api/youtube/search?${params.toString()}`, {
+        signal: searchAbortController.signal,
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data?.error || 'Search unavailable right now');
+      }
+
+      renderSearchResults(data.items || [], append);
+      searchNextPageToken = data.nextPageToken || null;
+      searchHasMore = Boolean(data.nextPageToken);
+      setSearchStatus(
+        data.items?.length
+          ? 'Select a result to queue it or play it next'
+          : 'No results found'
+      );
+    } catch (error) {
+      if (error.name === 'AbortError') return;
+      setSearchStatus(error.message || 'Search unavailable right now');
+    } finally {
+      setSearchLoading(false);
+    }
+  }
+
+  function queueSelectedSearchResult(type) {
+    if (!selectedSearchResult) return;
+    if (type === 'PLAY_NEXT' && !isHost) {
+      Notifications.info('Only the host can Play Next');
+      return;
+    }
+
+    send({ type, videoUrl: selectedSearchResult.videoId });
+    Notifications.success(
+      type === 'PLAY_NEXT' ? 'Song added to play next' : 'Song added to queue',
+      2200
+    );
+    setSearchStatus(
+      type === 'PLAY_NEXT'
+        ? 'Added to Play Next. Search results are still here for your next pick.'
+        : 'Added to queue. Search results are still here for your next pick.'
+    );
   }
 
   // ---- WebSocket Connection ----
@@ -282,6 +465,7 @@ const App = (() => {
     if (skipBtn) skipBtn.disabled = false; // Never physically disable so we can show toast
 
     if (seekBarEl) seekBarEl.disabled = !isHost;
+    updateSearchActionButtons();
   }
 
   // ---- Landing Events ----
@@ -371,33 +555,49 @@ const App = (() => {
       });
     });
 
-    // Add to queue
+    // Search and add songs
     const addBtn = document.getElementById('add-queue-btn');
     const playNextBtn = document.getElementById('play-next-btn');
-    const urlInput = document.getElementById('song-url-input');
+    const searchInput = document.getElementById('song-search-input');
+    const searchResults = document.getElementById('song-search-results');
+
+    updateSearchActionButtons();
 
     addBtn.addEventListener('click', () => {
-      const url = urlInput.value.trim();
-      if (!url) return;
-      send({ type: 'ADD_TO_QUEUE', videoUrl: url });
-      urlInput.value = '';
+      queueSelectedSearchResult('ADD_TO_QUEUE');
     });
 
     playNextBtn.addEventListener('click', () => {
-      if (!isHost) {
-        Notifications.info('Only the host can Play Next');
-        return;
-      }
-      const url = urlInput.value.trim();
-      if (!url) return;
-      send({ type: 'PLAY_NEXT', videoUrl: url });
-      urlInput.value = '';
+      queueSelectedSearchResult('PLAY_NEXT');
     });
 
-    // Enter key on URL input
-    urlInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') addBtn.click();
-    });
+    if (searchInput) {
+      searchInput.addEventListener('input', () => {
+        const query = searchInput.value;
+        if (searchDebounce) clearTimeout(searchDebounce);
+        searchDebounce = setTimeout(() => {
+          runSongSearch(query);
+        }, 350);
+      });
+
+      searchInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && selectedSearchResult) {
+          addBtn.click();
+        }
+      });
+    }
+
+    if (searchResults) {
+      searchResults.addEventListener('scroll', () => {
+        if (!searchHasMore || searchIsLoading) return;
+        const nearBottom =
+          searchResults.scrollTop + searchResults.clientHeight >= searchResults.scrollHeight - 36;
+
+        if (nearBottom) {
+          runSongSearch(searchQuery, { append: true });
+        }
+      });
+    }
 
     // Play/pause button (host only)
     const playPauseBtn = document.getElementById('play-pause-btn');

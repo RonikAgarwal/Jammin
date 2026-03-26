@@ -112,12 +112,18 @@
 
         <!-- Add Song Bar -->
         <div class="add-song-bar glass-panel">
-          <input type="text" id="song-url-input" placeholder="Paste a YouTube link to add to the queue..." autocomplete="off">
+          <div class="song-search-shell">
+            <div class="song-search-input-wrap">
+              <input type="text" id="song-search-input" placeholder="Search YouTube songs, artists, or vibes..." autocomplete="off">
+              <div class="song-search-status" id="song-search-status">Start typing to search</div>
+            </div>
+            <div class="song-search-results hidden" id="song-search-results"></div>
+          </div>
           <div class="add-song-actions">
-            <button id="add-queue-btn" class="btn btn-ghost" title="Add to Queue">
+            <button id="add-queue-btn" class="btn btn-ghost" title="Add to Queue" disabled>
               <span>+ Queue</span>
             </button>
-            <button id="play-next-btn" class="btn btn-accent" title="Play Next">
+            <button id="play-next-btn" class="btn btn-accent" title="Play Next" disabled>
               <span>▶ Next</span>
             </button>
           </div>
@@ -138,7 +144,7 @@
             <div class="queue-empty" id="queue-empty">
               <span class="empty-icon">🎶</span>
               <p>Queue is empty</p>
-              <p class="empty-hint">Paste a YouTube link to get started</p>
+              <p class="empty-hint">Search YouTube to get the room started</p>
             </div>
           </div>
         </div>
