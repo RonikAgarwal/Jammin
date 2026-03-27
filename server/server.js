@@ -23,12 +23,17 @@ const {
 const {
   addToQueue,
   playNext,
+  addPlaylistToQueue,
+  playNextPlaylist,
   reorderQueue,
   removeFromQueue,
+  removePlaylistGroup,
   playSelected,
+  playPlaylistGroup,
   getQueueList,
   requeueHistoryItem,
   parseYouTubeUrl,
+  parseYouTubePlaylistUrl,
 } = require('./queue');
 
 const {
@@ -60,7 +65,14 @@ const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || '';
 const CHAT_MESSAGE_LIMIT = 320;
 const CHAT_RATE_LIMIT_MS = 400;
 const YOUTUBE_SEARCH_CACHE_TTL_MS = 10 * 60 * 1000;
+const YOUTUBE_SUGGESTIONS_CACHE_TTL_MS = 15 * 60 * 1000;
+const YOUTUBE_PLAYLIST_CACHE_TTL_MS = 15 * 60 * 1000;
+const PLAYLIST_PREVIEW_TRACKS = 5;
+const PLAYLIST_IMPORT_MAX_TRACKS = 100;
 const youtubeSearchCache = new Map();
+const youtubeSuggestionsCache = new Map();
+const youtubePlaylistPreviewCache = new Map();
+const youtubePlaylistImportCache = new Map();
 
 function loadEnvFile(filePath) {
   if (!fs.existsSync(filePath)) return;
@@ -86,6 +98,241 @@ function loadEnvFile(filePath) {
 
     process.env[key] = value;
   });
+}
+
+async function requestYouTubeSearch(params) {
+  const response = await fetch(`https://www.googleapis.com/youtube/v3/search?${params.toString()}`);
+  const data = await response.json();
+  return { response, data };
+}
+
+function formatYouTubeSearchItems(data) {
+  return (data.items || [])
+    .filter((item) => item.id?.videoId)
+    .map((item) => ({
+      videoId: item.id.videoId,
+      title: item.snippet?.title || 'Untitled',
+      channelTitle: item.snippet?.channelTitle || '',
+      thumbnail:
+        item.snippet?.thumbnails?.medium?.url ||
+        item.snippet?.thumbnails?.default?.url ||
+        `https://img.youtube.com/vi/${item.id.videoId}/mqdefault.jpg`,
+    }));
+}
+
+function normalizeSuggestionQuery(text) {
+  return String(text || '')
+    .replace(/\[[^\]]*\]/g, ' ')
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/\b(official|video|lyrics?|lyrical|audio|full song|visualizer|topic)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function buildSuggestionQuery(title, artist) {
+  const cleanTitle = normalizeSuggestionQuery(title);
+  const cleanArtist = normalizeSuggestionQuery(artist);
+  return [cleanArtist, cleanTitle].filter(Boolean).join(' ').trim();
+}
+
+function dedupeSearchItems(items, excludedVideoId = '') {
+  const seen = new Set();
+  return items.filter((item) => {
+    if (!item?.videoId || item.videoId === excludedVideoId || seen.has(item.videoId)) {
+      return false;
+    }
+    seen.add(item.videoId);
+    return true;
+  });
+}
+
+async function requestYouTubeVideos(params) {
+  const response = await fetch(`https://www.googleapis.com/youtube/v3/videos?${params.toString()}`);
+  const data = await response.json();
+  return { response, data };
+}
+
+async function requestYouTubePlaylists(params) {
+  const response = await fetch(`https://www.googleapis.com/youtube/v3/playlists?${params.toString()}`);
+  const data = await response.json();
+  return { response, data };
+}
+
+async function requestYouTubePlaylistItems(params) {
+  const response = await fetch(`https://www.googleapis.com/youtube/v3/playlistItems?${params.toString()}`);
+  const data = await response.json();
+  return { response, data };
+}
+
+async function fetchPlaylistMeta(playlistId) {
+  const params = new URLSearchParams({
+    part: 'snippet,contentDetails',
+    id: playlistId,
+    key: YOUTUBE_API_KEY,
+  });
+  const { response, data } = await requestYouTubePlaylists(params);
+  if (!response.ok) {
+    const message = data?.error?.message || 'Unable to load that playlist right now.';
+    throw new Error(message);
+  }
+
+  const playlist = data.items?.[0];
+  if (!playlist) {
+    throw new Error('Playlist not found');
+  }
+
+  return {
+    playlistId,
+    title: playlist.snippet?.title || 'Untitled Playlist',
+    channelTitle: playlist.snippet?.channelTitle || '',
+    thumbnail:
+      playlist.snippet?.thumbnails?.medium?.url ||
+      playlist.snippet?.thumbnails?.default?.url ||
+      '',
+    itemCount: playlist.contentDetails?.itemCount || 0,
+  };
+}
+
+async function fetchPlaylistPreview(playlistId) {
+  const cached = youtubePlaylistPreviewCache.get(playlistId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.payload;
+  }
+  if (cached) youtubePlaylistPreviewCache.delete(playlistId);
+
+  const meta = await fetchPlaylistMeta(playlistId);
+  const params = new URLSearchParams({
+    part: 'snippet,contentDetails',
+    playlistId,
+    maxResults: String(PLAYLIST_PREVIEW_TRACKS),
+    key: YOUTUBE_API_KEY,
+  });
+
+  const { response, data } = await requestYouTubePlaylistItems(params);
+  if (!response.ok) {
+    const message = data?.error?.message || 'Unable to preview that playlist right now.';
+    throw new Error(message);
+  }
+
+  const previewTracks = (data.items || [])
+    .map((item) => ({
+      videoId: item.contentDetails?.videoId || '',
+      title: item.snippet?.title || 'Untitled',
+      artist: item.snippet?.videoOwnerChannelTitle || item.snippet?.channelTitle || '',
+      thumbnail:
+        item.snippet?.thumbnails?.medium?.url ||
+        item.snippet?.thumbnails?.default?.url ||
+        '',
+    }))
+    .filter((item) => item.videoId);
+
+  const payload = {
+    ...meta,
+    previewTracks,
+    importCount: Math.min(meta.itemCount || previewTracks.length, PLAYLIST_IMPORT_MAX_TRACKS),
+    isTruncated: (meta.itemCount || 0) > PLAYLIST_IMPORT_MAX_TRACKS,
+  };
+
+  youtubePlaylistPreviewCache.set(playlistId, {
+    expiresAt: Date.now() + YOUTUBE_PLAYLIST_CACHE_TTL_MS,
+    payload,
+  });
+
+  return payload;
+}
+
+async function fetchPlaylistImport(playlistId) {
+  const cached = youtubePlaylistImportCache.get(playlistId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.payload;
+  }
+  if (cached) youtubePlaylistImportCache.delete(playlistId);
+
+  const meta = await fetchPlaylistMeta(playlistId);
+  const playlistItems = [];
+  let pageToken = '';
+
+  while (playlistItems.length < PLAYLIST_IMPORT_MAX_TRACKS) {
+    const params = new URLSearchParams({
+      part: 'snippet,contentDetails',
+      playlistId,
+      maxResults: '50',
+      key: YOUTUBE_API_KEY,
+    });
+    if (pageToken) params.set('pageToken', pageToken);
+
+    const { response, data } = await requestYouTubePlaylistItems(params);
+    if (!response.ok) {
+      const message = data?.error?.message || 'Unable to load that playlist right now.';
+      throw new Error(message);
+    }
+
+    playlistItems.push(...(data.items || []));
+    pageToken = data.nextPageToken || '';
+    if (!pageToken) break;
+  }
+
+  const slicedItems = playlistItems.slice(0, PLAYLIST_IMPORT_MAX_TRACKS);
+  const orderedVideoIds = slicedItems
+    .map((item) => item.contentDetails?.videoId || '')
+    .filter(Boolean);
+
+  const videoMap = new Map();
+  for (let index = 0; index < orderedVideoIds.length; index += 50) {
+    const chunk = orderedVideoIds.slice(index, index + 50);
+    const params = new URLSearchParams({
+      part: 'snippet,status',
+      id: chunk.join(','),
+      key: YOUTUBE_API_KEY,
+    });
+    const { response, data } = await requestYouTubeVideos(params);
+    if (!response.ok) continue;
+
+    (data.items || []).forEach((video) => {
+      videoMap.set(video.id, video);
+    });
+  }
+
+  const items = slicedItems
+    .map((item) => {
+      const videoId = item.contentDetails?.videoId || '';
+      const video = videoMap.get(videoId);
+      const embeddable = video?.status?.embeddable !== false;
+      const privacyStatus = video?.status?.privacyStatus || 'public';
+      if (!videoId || !video || !embeddable || privacyStatus !== 'public') {
+        return null;
+      }
+
+      return {
+        videoId,
+        title: video.snippet?.title || item.snippet?.title || 'Untitled',
+        artist:
+          video.snippet?.channelTitle ||
+          item.snippet?.videoOwnerChannelTitle ||
+          item.snippet?.channelTitle ||
+          '',
+        thumbnail:
+          video.snippet?.thumbnails?.medium?.url ||
+          item.snippet?.thumbnails?.medium?.url ||
+          item.snippet?.thumbnails?.default?.url ||
+          `https://img.youtube.com/vi/${videoId}/mqdefault.jpg`,
+      };
+    })
+    .filter(Boolean);
+
+  const payload = {
+    ...meta,
+    items,
+    importCount: items.length,
+    isTruncated: (meta.itemCount || 0) > PLAYLIST_IMPORT_MAX_TRACKS,
+  };
+
+  youtubePlaylistImportCache.set(playlistId, {
+    expiresAt: Date.now() + YOUTUBE_PLAYLIST_CACHE_TTL_MS,
+    payload,
+  });
+
+  return payload;
 }
 
 app.get('/api/youtube/search', async (req, res) => {
@@ -126,8 +373,7 @@ app.get('/api/youtube/search', async (req, res) => {
 
     if (pageToken) params.set('pageToken', pageToken);
 
-    const response = await fetch(`https://www.googleapis.com/youtube/v3/search?${params.toString()}`);
-    const data = await response.json();
+    const { response, data } = await requestYouTubeSearch(params);
 
     if (!response.ok) {
       const reason = data?.error?.errors?.[0]?.reason || '';
@@ -144,20 +390,8 @@ app.get('/api/youtube/search', async (req, res) => {
       });
     }
 
-    const items = (data.items || [])
-      .filter((item) => item.id?.videoId)
-      .map((item) => ({
-        videoId: item.id.videoId,
-        title: item.snippet?.title || 'Untitled',
-        channelTitle: item.snippet?.channelTitle || '',
-        thumbnail:
-          item.snippet?.thumbnails?.medium?.url ||
-          item.snippet?.thumbnails?.default?.url ||
-          `https://img.youtube.com/vi/${item.id.videoId}/mqdefault.jpg`,
-      }));
-
     const payload = {
-      items,
+      items: formatYouTubeSearchItems(data),
       nextPageToken: data.nextPageToken || null,
     };
 
@@ -173,6 +407,111 @@ app.get('/api/youtube/search', async (req, res) => {
       code: 'youtube_search_unavailable',
     });
   }
+});
+
+app.get('/api/youtube/suggestions', async (req, res) => {
+  const videoId = String(req.query.videoId || '').trim();
+  const title = String(req.query.title || '').trim();
+  const artist = String(req.query.artist || '').trim();
+  const cacheKey = `${videoId}::${title.toLowerCase()}::${artist.toLowerCase()}`;
+
+  if (!YOUTUBE_API_KEY || (!videoId && !title && !artist)) {
+    return res.json({ items: [] });
+  }
+
+  const cached = youtubeSuggestionsCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return res.json(cached.payload);
+  }
+
+  if (cached) {
+    youtubeSuggestionsCache.delete(cacheKey);
+  }
+
+  try {
+    const candidateItems = [];
+
+    if (videoId) {
+      const relatedParams = new URLSearchParams({
+        part: 'snippet',
+        type: 'video',
+        relatedToVideoId: videoId,
+        videoEmbeddable: 'true',
+        videoSyndicated: 'true',
+        maxResults: '8',
+        key: YOUTUBE_API_KEY,
+      });
+      const { response, data } = await requestYouTubeSearch(relatedParams);
+      if (response.ok) {
+        candidateItems.push(...formatYouTubeSearchItems(data));
+      }
+    }
+
+    const fallbackQuery = buildSuggestionQuery(title, artist);
+    if (candidateItems.length < 5 && fallbackQuery) {
+      const fallbackParams = new URLSearchParams({
+        part: 'snippet',
+        type: 'video',
+        videoEmbeddable: 'true',
+        videoSyndicated: 'true',
+        maxResults: '8',
+        q: fallbackQuery,
+        key: YOUTUBE_API_KEY,
+      });
+      const { response, data } = await requestYouTubeSearch(fallbackParams);
+      if (response.ok) {
+        candidateItems.push(...formatYouTubeSearchItems(data));
+      }
+    }
+
+    const payload = {
+      items: dedupeSearchItems(candidateItems, videoId).slice(0, 6),
+    };
+
+    youtubeSuggestionsCache.set(cacheKey, {
+      expiresAt: Date.now() + YOUTUBE_SUGGESTIONS_CACHE_TTL_MS,
+      payload,
+    });
+
+    return res.json(payload);
+  } catch {
+    return res.json({ items: [] });
+  }
+});
+
+app.get('/api/youtube/playlist-preview', async (req, res) => {
+  const playlistId = String(req.query.playlistId || '').trim();
+
+  if (!YOUTUBE_API_KEY) {
+    return res.status(503).json({
+      error: 'Playlist import is not configured on the server.',
+      code: 'youtube_api_key_missing',
+    });
+  }
+
+  if (!playlistId) {
+    return res.status(400).json({
+      error: 'Playlist link is missing a list id.',
+      code: 'playlist_id_missing',
+    });
+  }
+
+  try {
+    const preview = await fetchPlaylistPreview(playlistId);
+    return res.json(preview);
+  } catch (error) {
+    return res.status(400).json({
+      error: error.message || 'Unable to preview that playlist right now.',
+      code: 'playlist_preview_failed',
+    });
+  }
+});
+
+app.use('/api', (req, res) => {
+  return res.status(404).json({
+    error: 'This Jammin server is missing that API route. Restart the server and refresh the page.',
+    code: 'api_route_not_found',
+  });
 });
 
 // WebSocket connection handler
@@ -240,12 +579,20 @@ function handleMessage(ws, msg) {
       return handleAddToQueue(ws, msg);
     case 'PLAY_NEXT':
       return handlePlayNext(ws, msg);
+    case 'ADD_PLAYLIST_TO_QUEUE':
+      return handleAddPlaylistToQueue(ws, msg);
+    case 'PLAYLIST_PLAY_NEXT':
+      return handlePlayNextPlaylistMsg(ws, msg);
     case 'REORDER_QUEUE':
       return handleReorderQueue(ws, msg);
     case 'REMOVE_FROM_QUEUE':
       return handleRemoveFromQueue(ws, msg);
+    case 'REMOVE_PLAYLIST_GROUP':
+      return handleRemovePlaylistGroupMsg(ws, msg);
     case 'PLAY_SELECTED':
       return handlePlaySelected(ws, msg);
+    case 'PLAY_PLAYLIST_GROUP':
+      return handlePlayPlaylistGroupMsg(ws, msg);
     case 'REQUEUE_HISTORY_ITEM':
       return handleRequeueHistoryItem(ws, msg);
     case 'TRANSFER_HOST':
@@ -393,6 +740,51 @@ async function handlePlayNext(ws, msg) {
   }
 }
 
+async function handleAddPlaylistToQueue(ws, msg) {
+  const session = getSessionByWs(ws);
+  if (!session) return send(ws, { type: 'ERROR', message: 'Not in a session' });
+
+  const playlistId = String(msg.playlistId || '').trim() || parseYouTubePlaylistUrl(msg.playlistUrl || '');
+  if (!playlistId) return send(ws, { type: 'ERROR', message: 'Invalid YouTube playlist link' });
+
+  try {
+    const playlist = await fetchPlaylistImport(playlistId);
+    if (!playlist.items.length) {
+      return send(ws, { type: 'ERROR', message: 'No playable tracks were found in that playlist' });
+    }
+
+    const result = addPlaylistToQueue(session, playlist, ws._jammin.username);
+    if (result.autoPlay) {
+      startPlayback(session, result.item);
+    }
+  } catch (error) {
+    return send(ws, { type: 'ERROR', message: error.message || 'Unable to import that playlist right now' });
+  }
+}
+
+async function handlePlayNextPlaylistMsg(ws, msg) {
+  const session = getSessionByWs(ws);
+  if (!session) return send(ws, { type: 'ERROR', message: 'Not in a session' });
+  if (session.host !== ws._jammin.userId) return send(ws, { type: 'ERROR', message: 'Only the controller can play next' });
+
+  const playlistId = String(msg.playlistId || '').trim() || parseYouTubePlaylistUrl(msg.playlistUrl || '');
+  if (!playlistId) return send(ws, { type: 'ERROR', message: 'Invalid YouTube playlist link' });
+
+  try {
+    const playlist = await fetchPlaylistImport(playlistId);
+    if (!playlist.items.length) {
+      return send(ws, { type: 'ERROR', message: 'No playable tracks were found in that playlist' });
+    }
+
+    const result = playNextPlaylist(session, playlist, ws._jammin.username);
+    if (result.autoPlay) {
+      startPlayback(session, result.item);
+    }
+  } catch (error) {
+    return send(ws, { type: 'ERROR', message: error.message || 'Unable to import that playlist right now' });
+  }
+}
+
 function handleReorderQueue(ws, msg) {
   const session = getSessionByWs(ws);
   if (!session || !ws._jammin || session.host !== ws._jammin.userId) return;
@@ -405,11 +797,27 @@ function handleRemoveFromQueue(ws, msg) {
   removeFromQueue(session, msg.itemId);
 }
 
+function handleRemovePlaylistGroupMsg(ws, msg) {
+  const session = getSessionByWs(ws);
+  if (!session || !ws._jammin || session.host !== ws._jammin.userId) return;
+  removePlaylistGroup(session, msg.playlistGroupId);
+}
+
 function handlePlaySelected(ws, msg) {
   const session = getSessionByWs(ws);
   if (!session || !ws._jammin || session.host !== ws._jammin.userId) return;
 
   const item = playSelected(session, msg.itemId);
+  if (item) {
+    startPlayback(session, item);
+  }
+}
+
+function handlePlayPlaylistGroupMsg(ws, msg) {
+  const session = getSessionByWs(ws);
+  if (!session || !ws._jammin || session.host !== ws._jammin.userId) return;
+
+  const item = playPlaylistGroup(session, msg.playlistGroupId);
   if (item) {
     startPlayback(session, item);
   }

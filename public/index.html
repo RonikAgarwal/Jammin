@@ -106,7 +106,8 @@
             <div id="player-placeholder" class="player-placeholder">
               <div class="placeholder-content">
                 <span class="placeholder-icon" aria-hidden="true"><span></span><span></span><span></span></span>
-                <p>Pick a track to begin</p>
+                <p id="player-placeholder-title">Pick a track to begin</p>
+                <p id="player-placeholder-copy" class="placeholder-copy hidden"></p>
               </div>
             </div>
           </div>
@@ -118,7 +119,10 @@
             <div class="playing-indicator">
               <span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span>
             </div>
-            <span class="now-playing-title" id="now-playing-title">Nothing playing</span>
+            <div class="now-playing-copy">
+              <span class="now-playing-title" id="now-playing-title">Nothing playing</span>
+              <span class="now-playing-subtitle" id="now-playing-subtitle"></span>
+            </div>
           </div>
           <div class="player-controls">
             <div class="custom-seek-container" id="custom-seek-container">
@@ -135,6 +139,14 @@
         <!-- Add Song Bar -->
         <div class="add-song-bar glass-panel">
           <div class="song-search-shell">
+            <div class="song-input-mode-toggle" id="song-input-mode-toggle" role="tablist" aria-label="Song input mode">
+              <button class="song-input-mode-btn active" id="song-mode-search-btn" type="button" data-mode="search" role="tab" aria-selected="true">
+                Search YouTube
+              </button>
+              <button class="song-input-mode-btn" id="song-mode-link-btn" type="button" data-mode="link" role="tab" aria-selected="false">
+                Paste Link
+              </button>
+            </div>
             <div class="song-search-input-wrap">
               <input type="text" id="song-search-input" placeholder="Search YouTube songs, artists, or soundtracks..." autocomplete="off">
               <div class="song-search-status" id="song-search-status">Start typing to search</div>
@@ -260,6 +272,26 @@
       <div class="control-transfer-actions">
         <button class="btn btn-ghost" id="control-transfer-cancel" type="button">Keep controls</button>
         <button class="btn btn-accent" id="control-transfer-confirm" type="button">Pass controls</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="playlist-import-modal hidden" id="playlist-import-modal">
+    <div class="playlist-import-card glass-panel" role="dialog" aria-modal="true" aria-labelledby="playlist-import-title">
+      <div class="playlist-import-kicker">Playlist Import</div>
+      <div class="playlist-import-hero">
+        <img class="playlist-import-cover" id="playlist-import-cover" alt="Playlist artwork">
+        <div class="playlist-import-copy">
+          <h3 class="playlist-import-title" id="playlist-import-title">Playlist</h3>
+          <p class="playlist-import-meta" id="playlist-import-meta">YouTube playlist</p>
+          <p class="playlist-import-count" id="playlist-import-count">Tracks ready for the room</p>
+        </div>
+      </div>
+      <div class="playlist-import-preview-list" id="playlist-import-preview-list"></div>
+      <div class="playlist-import-actions">
+        <button class="btn btn-ghost" id="playlist-import-cancel" type="button">Cancel</button>
+        <button class="btn btn-ghost" id="playlist-import-add-queue" type="button">Add Playlist</button>
+        <button class="btn btn-accent" id="playlist-import-play-now" type="button">Play Playlist Next</button>
       </div>
     </div>
   </div>

@@ -8,6 +8,7 @@ const Player = (() => {
   let onEndedCallback = null;
   let onPlayStateChangeCallback = null;
   let onSeekCallback = null;
+  let onErrorCallback = null;
   let currentVideoId = null;
   let lastRecordedTime = 0;
   let seekDetectInterval = null;
@@ -18,6 +19,7 @@ const Player = (() => {
     onEndedCallback = callbacks.onEnded || null;
     onPlayStateChangeCallback = callbacks.onPlayStateChange || null;
     onSeekCallback = callbacks.onSeek || null;
+    onErrorCallback = callbacks.onError || null;
 
     // YouTube API ready callback
     window.onYouTubeIframeAPIReady = () => {
@@ -107,6 +109,21 @@ const Player = (() => {
   function handleError(event) {
     const errorCode = Number(event.data);
     console.error('YouTube Player Error:', errorCode);
+    stopTimeReporting();
+
+    const blockedMessage =
+      errorCode === 101 || errorCode === 150
+        ? 'This track is blocked from playing inside the embedded player on this device.'
+        : 'This track cannot be played in the embedded player right now.';
+
+    showPlaceholder('Track unavailable', blockedMessage);
+
+    if (onErrorCallback) {
+      onErrorCallback({
+        code: errorCode,
+        videoId: currentVideoId,
+      });
+    }
 
     if (errorCode === 101 || errorCode === 150) {
       Notifications.error('This video is blocked from playing inside embedded players on this device');
@@ -217,12 +234,26 @@ const Player = (() => {
 
   function hidePlaceholder() {
     const ph = document.getElementById('player-placeholder');
+    const titleEl = document.getElementById('player-placeholder-title');
+    const copyEl = document.getElementById('player-placeholder-copy');
     if (ph) ph.classList.add('hidden');
+    if (titleEl) titleEl.textContent = 'Pick a track to begin';
+    if (copyEl) {
+      copyEl.textContent = '';
+      copyEl.classList.add('hidden');
+    }
   }
 
-  function showPlaceholder() {
+  function showPlaceholder(title = 'Pick a track to begin', detail = '') {
     const ph = document.getElementById('player-placeholder');
+    const titleEl = document.getElementById('player-placeholder-title');
+    const copyEl = document.getElementById('player-placeholder-copy');
     if (ph) ph.classList.remove('hidden');
+    if (titleEl) titleEl.textContent = title;
+    if (copyEl) {
+      copyEl.textContent = detail;
+      copyEl.classList.toggle('hidden', !detail);
+    }
   }
 
   function playWithDelay(startTime, delayMs) {

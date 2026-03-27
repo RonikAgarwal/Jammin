@@ -12,8 +12,33 @@ function createQueueItem(videoInfo, addedBy) {
     addedBy,
     artist: videoInfo.artist || '',
     duration: videoInfo.duration || '',
+    playlistGroupId: videoInfo.playlistGroupId || null,
+    playlistId: videoInfo.playlistId || null,
+    playlistName: videoInfo.playlistName || '',
+    playlistThumbnail: videoInfo.playlistThumbnail || '',
+    playlistChannelTitle: videoInfo.playlistChannelTitle || '',
+    playlistTrackNumber: videoInfo.playlistTrackNumber || null,
+    playlistLength: videoInfo.playlistLength || null,
     addedAt: Date.now(),
   };
+}
+
+function createPlaylistItems(playlistInfo, addedBy) {
+  const groupId = 'plg_' + Math.random().toString(36).substring(2, 10);
+  const totalTracks = playlistInfo.items.length;
+
+  return playlistInfo.items.map((videoInfo, index) =>
+    createQueueItem({
+      ...videoInfo,
+      playlistGroupId: groupId,
+      playlistId: playlistInfo.playlistId,
+      playlistName: playlistInfo.title || 'Playlist',
+      playlistThumbnail: playlistInfo.thumbnail || videoInfo.thumbnail || '',
+      playlistChannelTitle: playlistInfo.channelTitle || '',
+      playlistTrackNumber: index + 1,
+      playlistLength: totalTracks,
+    }, addedBy)
+  );
 }
 
 function addToQueue(session, videoInfo, addedBy) {
@@ -50,6 +75,40 @@ function playNext(session, videoInfo, addedBy) {
   return { autoPlay: false, item };
 }
 
+function addPlaylistToQueue(session, playlistInfo, addedBy) {
+  const items = createPlaylistItems(playlistInfo, addedBy);
+  if (items.length === 0) return { autoPlay: false, item: null };
+
+  session.vibeSource = items[0].videoId;
+
+  if (session.playbackState === 'idle' && !session.currentVideo) {
+    const [firstItem, ...rest] = items;
+    if (rest.length) session.queue.push(...rest);
+    return { autoPlay: true, item: firstItem };
+  }
+
+  session.queue.push(...items);
+  broadcastQueueUpdate(session);
+  return { autoPlay: false, item: null };
+}
+
+function playNextPlaylist(session, playlistInfo, addedBy) {
+  const items = createPlaylistItems(playlistInfo, addedBy);
+  if (items.length === 0) return { autoPlay: false, item: null };
+
+  session.vibeSource = items[0].videoId;
+
+  if (session.playbackState === 'idle' && !session.currentVideo) {
+    const [firstItem, ...rest] = items;
+    if (rest.length) session.queue.push(...rest);
+    return { autoPlay: true, item: firstItem };
+  }
+
+  session.queue.unshift(...items);
+  broadcastQueueUpdate(session);
+  return { autoPlay: false, item: null };
+}
+
 function reorderQueue(session, fromIndex, toIndex) {
   if (fromIndex < 0 || fromIndex >= session.queue.length) return false;
   if (toIndex < 0 || toIndex >= session.queue.length) return false;
@@ -70,6 +129,17 @@ function removeFromQueue(session, itemId) {
   return true;
 }
 
+function removePlaylistGroup(session, playlistGroupId) {
+  if (!playlistGroupId) return false;
+
+  const originalLength = session.queue.length;
+  session.queue = session.queue.filter((item) => item.playlistGroupId !== playlistGroupId);
+  if (session.queue.length === originalLength) return false;
+
+  broadcastQueueUpdate(session);
+  return true;
+}
+
 function playSelected(session, itemId) {
   const index = session.queue.findIndex(item => item.id === itemId);
   if (index === -1) return null;
@@ -79,6 +149,21 @@ function playSelected(session, itemId) {
 
   broadcastQueueUpdate(session);
   return item;
+}
+
+function playPlaylistGroup(session, playlistGroupId) {
+  if (!playlistGroupId) return null;
+
+  const groupItems = session.queue.filter((item) => item.playlistGroupId === playlistGroupId);
+  if (groupItems.length === 0) return null;
+
+  const remainingGroupItems = groupItems.slice(1);
+  const otherItems = session.queue.filter((item) => item.playlistGroupId !== playlistGroupId);
+  session.queue = [...remainingGroupItems, ...otherItems];
+  session.vibeSource = groupItems[0].videoId;
+
+  broadcastQueueUpdate(session);
+  return groupItems[0];
 }
 
 function getNextInQueue(session) {
@@ -141,6 +226,13 @@ function formatQueueItem(item) {
     addedBy: item.addedBy,
     artist: item.artist || '',
     duration: item.duration || '',
+    playlistGroupId: item.playlistGroupId || null,
+    playlistId: item.playlistId || null,
+    playlistName: item.playlistName || '',
+    playlistThumbnail: item.playlistThumbnail || '',
+    playlistChannelTitle: item.playlistChannelTitle || '',
+    playlistTrackNumber: item.playlistTrackNumber || null,
+    playlistLength: item.playlistLength || null,
   };
 }
 
@@ -165,12 +257,32 @@ function parseYouTubeUrl(url) {
   return null;
 }
 
+function parseYouTubePlaylistUrl(url) {
+  const raw = String(url || '').trim();
+  if (!raw) return null;
+
+  try {
+    const parsed = new URL(raw.startsWith('http') ? raw : `https://${raw}`);
+    const list = parsed.searchParams.get('list');
+    if (list) return list;
+  } catch (error) {
+    const match = raw.match(/[?&]list=([a-zA-Z0-9_-]+)/);
+    if (match) return match[1];
+  }
+
+  return null;
+}
+
 module.exports = {
   addToQueue,
   playNext,
+  addPlaylistToQueue,
+  playNextPlaylist,
   reorderQueue,
   removeFromQueue,
+  removePlaylistGroup,
   playSelected,
+  playPlaylistGroup,
   getNextInQueue,
   getQueueList,
   getQueueState,
@@ -179,4 +291,5 @@ module.exports = {
   requeueHistoryItem,
   broadcastQueueUpdate,
   parseYouTubeUrl,
+  parseYouTubePlaylistUrl,
 };

@@ -8,6 +8,12 @@ const QueueUI = (() => {
     upcoming: [],
     history: [],
   };
+  let expandedPlaylistGroups = new Set();
+  let suggestionsState = {
+    items: [],
+    loading: false,
+    hidden: true,
+  };
   let dragState = null;
   let openMenuEl = null;
   let openMenuCloseTimer = null;
@@ -37,6 +43,17 @@ const QueueUI = (() => {
 
     render();
     updateTransportControls();
+    closeOpenMenu();
+  }
+
+  function setSuggestions(nextState = {}) {
+    suggestionsState = {
+      items: nextState.hidden ? [] : (nextState.items || []),
+      loading: Boolean(nextState.loading),
+      hidden: Boolean(nextState.hidden),
+    };
+
+    render();
     closeOpenMenu();
   }
 
@@ -73,13 +90,46 @@ const QueueUI = (() => {
     );
 
     if (state.upcoming.length > 0) {
-      state.upcoming.forEach((item, index) => {
-        listEl.appendChild(createUpcomingRow(item, index));
+      let queuePosition = 0;
+      groupUpcomingItems(state.upcoming).forEach((group) => {
+        if (group.type === 'playlist') {
+          listEl.appendChild(createPlaylistGroupCard(group, queuePosition));
+          if (expandedPlaylistGroups.has(group.groupId)) {
+            group.items.forEach((item, playlistIndex) => {
+              listEl.appendChild(
+                createUpcomingRow(item, queuePosition + playlistIndex, {
+                  rowClass: 'queue-row-playlist-track',
+                  metaOverride: formatPlaylistTrackMeta(item),
+                  hideMenuLabel: true,
+                })
+              );
+            });
+          }
+          queuePosition += group.items.length;
+          return;
+        }
+
+        listEl.appendChild(createUpcomingRow(group.item, queuePosition));
+        queuePosition += 1;
       });
     } else {
       listEl.appendChild(
         createHelperCard('No tracks waiting', 'Search for another song to keep the queue moving.')
       );
+    }
+
+    if (!suggestionsState.hidden && (suggestionsState.loading || suggestionsState.items.length > 0)) {
+      listEl.appendChild(createSectionTitle('Suggested Next', 'Auto picks'));
+
+      if (suggestionsState.loading && suggestionsState.items.length === 0) {
+        listEl.appendChild(
+          createHelperCard('Finding a few good next picks', 'These suggestions adjust to the current vibe.')
+        );
+      } else {
+        suggestionsState.items.forEach((item) => {
+          listEl.appendChild(createSuggestionCard(item));
+        });
+      }
     }
   }
 
@@ -151,13 +201,14 @@ const QueueUI = (() => {
     return el;
   }
 
-  function createUpcomingRow(item, index) {
+  function createUpcomingRow(item, index, options = {}) {
     const el = document.createElement('div');
-    el.className = 'queue-row queue-row-upnext';
+    el.className = `queue-row queue-row-upnext ${options.rowClass || ''}`.trim();
     el.dataset.dropType = 'upcoming';
     el.dataset.dropIndex = String(index);
 
     const isHost = window.App && window.App.getIsHost();
+    const metaText = options.metaOverride || formatMeta(item);
 
     el.innerHTML = `
       <div class="queue-row-marker queue-row-marker-index">${index + 1}</div>
@@ -165,12 +216,12 @@ const QueueUI = (() => {
       ${createThumbnailHtml(item, 'queue-row-thumb')}
       <div class="queue-row-content">
         <div class="queue-row-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</div>
-        <div class="queue-row-meta">${escapeHtml(formatMeta(item))}</div>
+        <div class="queue-row-meta">${escapeHtml(metaText)}</div>
       </div>
       ${isHost ? `
         <div class="queue-row-actions">
           ${createRowMenuHtml([
-            { action: 'play-now', label: 'Play now' },
+            { action: 'play-now', label: options.hideMenuLabel ? 'Play this track now' : 'Play now' },
             { action: 'remove', label: 'Remove' },
           ])}
         </div>
@@ -185,6 +236,92 @@ const QueueUI = (() => {
     });
     bindUpcomingRow(el, item, index, isHost);
     return el;
+  }
+
+  function createPlaylistGroupCard(group, startIndex) {
+    const el = document.createElement('div');
+    const firstItem = group.items[0];
+    const isHost = window.App && window.App.getIsHost();
+    const isExpanded = expandedPlaylistGroups.has(group.groupId);
+    const previewTitles = group.items
+      .slice(0, 3)
+      .map((item) => item.title)
+      .join(' • ');
+
+    el.className = 'queue-row queue-row-upnext queue-playlist-card';
+    el.dataset.dropType = 'upcoming';
+    el.dataset.dropIndex = String(startIndex);
+    el.innerHTML = `
+      <div class="queue-row-marker queue-row-marker-index">${startIndex + 1}</div>
+      <div class="queue-playlist-thumb-wrap">
+        ${createThumbnailHtml({
+          thumbnail: firstItem.playlistThumbnail || firstItem.thumbnail,
+          videoId: firstItem.videoId,
+        }, 'queue-row-thumb')}
+        <span class="queue-playlist-badge">Playlist</span>
+      </div>
+      <div class="queue-row-content">
+        <div class="queue-row-title-wrap">
+          <div class="queue-row-title" title="${escapeHtml(firstItem.playlistName || 'Playlist')}">${escapeHtml(firstItem.playlistName || 'Playlist')}</div>
+          <span class="queue-status-muted queue-status-playlist-count">${group.items.length} tracks</span>
+        </div>
+        <div class="queue-row-meta">${escapeHtml(formatPlaylistMeta(firstItem, group.items.length))}</div>
+        <div class="queue-playlist-preview" title="${escapeHtml(previewTitles)}">${escapeHtml(previewTitles)}</div>
+      </div>
+      <button class="queue-playlist-toggle" type="button" aria-expanded="${isExpanded ? 'true' : 'false'}" title="${isExpanded ? 'Hide playlist tracks' : 'Show playlist tracks'}">
+        <span class="queue-playlist-toggle-label">${isExpanded ? 'Hide tracks' : 'Show tracks'}</span>
+        <span class="queue-playlist-toggle-chevron">${isExpanded ? '−' : '+'}</span>
+      </button>
+      ${isHost ? `
+        <div class="queue-row-actions">
+          ${createRowMenuHtml([
+            { action: isExpanded ? 'collapse-group' : 'expand-group', label: isExpanded ? 'Hide tracks' : 'Show tracks' },
+            { action: 'play-group-now', label: 'Play playlist now' },
+            { action: 'remove-group', label: 'Remove playlist' },
+          ])}
+        </div>
+      ` : ''}
+    `;
+
+    const toggleBtn = el.querySelector('.queue-playlist-toggle');
+    if (toggleBtn) {
+      toggleBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        togglePlaylistGroup(group.groupId);
+      });
+    }
+
+    if (isHost) {
+      bindRowMenu(el, {
+        'expand-group': () => togglePlaylistGroup(group.groupId, true),
+        'collapse-group': () => togglePlaylistGroup(group.groupId, false),
+        'play-group-now': () => {
+          if (window.App) App.send({ type: 'PLAY_PLAYLIST_GROUP', playlistGroupId: group.groupId });
+        },
+        'remove-group': () => {
+          if (window.App) App.send({ type: 'REMOVE_PLAYLIST_GROUP', playlistGroupId: group.groupId });
+        },
+      });
+    }
+
+    return el;
+  }
+
+  function togglePlaylistGroup(groupId, forceValue = null) {
+    if (!groupId) return;
+
+    const shouldExpand = forceValue === null
+      ? !expandedPlaylistGroups.has(groupId)
+      : Boolean(forceValue);
+
+    if (shouldExpand) {
+      expandedPlaylistGroups.add(groupId);
+    } else {
+      expandedPlaylistGroups.delete(groupId);
+    }
+
+    render();
+    updateTransportControls();
   }
 
   function createThumbnailHtml(item, className) {
@@ -482,6 +619,51 @@ const QueueUI = (() => {
     return el;
   }
 
+  function createSuggestionCard(item) {
+    const el = document.createElement('div');
+    const isHost = window.App && window.App.getIsHost();
+    el.className = 'queue-suggestion-card';
+
+    el.innerHTML = `
+      ${createThumbnailHtml(item, 'queue-suggestion-thumb')}
+      <div class="queue-suggestion-copy">
+        <div class="queue-suggestion-kicker">Suggested for this room</div>
+        <div class="queue-suggestion-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</div>
+        <div class="queue-suggestion-meta">${escapeHtml(item.channelTitle || item.artist || 'YouTube')}</div>
+      </div>
+      <div class="queue-suggestion-actions">
+        <button class="queue-suggestion-btn queue-suggestion-btn-primary" type="button" data-action="queue">+ Queue</button>
+        ${
+          isHost
+            ? '<button class="queue-suggestion-btn" type="button" data-action="play-next">Play Next</button>'
+            : ''
+        }
+      </div>
+    `;
+
+    el.querySelectorAll('.queue-suggestion-btn').forEach((button) => {
+      button.addEventListener('click', () => {
+        if (!window.App) return;
+
+        const action = button.dataset.action;
+        if (action === 'play-next') {
+          App.send({ type: 'PLAY_NEXT', videoUrl: item.videoId });
+          if (window.Notifications?.success) {
+            Notifications.success('Suggestion moved to play next', 1800);
+          }
+          return;
+        }
+
+        App.send({ type: 'ADD_TO_QUEUE', videoUrl: item.videoId });
+        if (window.Notifications?.success) {
+          Notifications.success('Suggestion added to queue', 1800);
+        }
+      });
+    });
+
+    return el;
+  }
+
   function updateTransportControls() {
     const prevBtn = document.getElementById('prev-btn');
     const nextBtn = document.getElementById('next-btn');
@@ -499,8 +681,59 @@ const QueueUI = (() => {
   function formatMeta(item) {
     const pieces = [];
     if (item.artist) pieces.push(item.artist);
+    if (item.playlistName) {
+      const position =
+        item.playlistTrackNumber && item.playlistLength
+          ? `${item.playlistTrackNumber}/${item.playlistLength}`
+          : 'Playlist';
+      pieces.push(`${item.playlistName} · ${position}`);
+    }
     if (item.addedBy) pieces.push(`Added by ${item.addedBy}`);
     return pieces.join(' - ') || 'Queued track';
+  }
+
+  function formatPlaylistMeta(item, trackCount) {
+    const pieces = [];
+    if (item.playlistChannelTitle) pieces.push(item.playlistChannelTitle);
+    else if (item.artist) pieces.push(item.artist);
+    pieces.push(`${trackCount} tracks`);
+    if (item.addedBy) pieces.push(`Added by ${item.addedBy}`);
+    return pieces.join(' - ');
+  }
+
+  function formatPlaylistTrackMeta(item) {
+    const pieces = [];
+    if (item.playlistTrackNumber && item.playlistLength) {
+      pieces.push(`Track ${item.playlistTrackNumber} of ${item.playlistLength}`);
+    }
+    if (item.artist) pieces.push(item.artist);
+    if (item.addedBy) pieces.push(`Added by ${item.addedBy}`);
+    return pieces.join(' - ');
+  }
+
+  function groupUpcomingItems(items) {
+    const groups = [];
+
+    items.forEach((item) => {
+      if (!item.playlistGroupId) {
+        groups.push({ type: 'track', item });
+        return;
+      }
+
+      const previous = groups[groups.length - 1];
+      if (previous?.type === 'playlist' && previous.groupId === item.playlistGroupId) {
+        previous.items.push(item);
+        return;
+      }
+
+      groups.push({
+        type: 'playlist',
+        groupId: item.playlistGroupId,
+        items: [item],
+      });
+    });
+
+    return groups;
   }
 
   function thumbnailFor(videoId) {
@@ -542,5 +775,5 @@ const QueueUI = (() => {
     return div.innerHTML;
   }
 
-  return { init, update, refreshPermissions };
+  return { init, update, setSuggestions, refreshPermissions };
 })();

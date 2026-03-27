@@ -23,6 +23,14 @@ const App = (() => {
   let searchHasMore = false;
   let searchIsLoading = false;
   let selectedSearchResult = null;
+  let songInputMode = 'search';
+  let searchInputDraft = '';
+  let linkInputDraft = '';
+  let youtubeSearchQuotaExhausted = false;
+  let playlistPreviewAbortController = null;
+  let pendingPlaylistImport = null;
+  let currentQueueState = { current: null, upcoming: [], history: [] };
+  let suggestionAbortController = null;
   let pendingControlTransfer = null;
   let roomPlaybackState = 'idle';
   let roomCurrentVideoId = null;
@@ -30,12 +38,17 @@ const App = (() => {
   let roomReferenceStartedAt = null;
   let playbackUnlockTimer = null;
   let hasPlaybackUnlock = false;
+  const locallyBlockedVideoIds = new Set();
+  let lastHandledPlayerErrorKey = '';
   let themeRequestToken = 0;
   let activeThemeKey = 'default';
   const themeCache = new Map();
   const SEARCH_DEBOUNCE_MS = 550;
   const MIN_SEARCH_CHARS = 3;
   const searchCache = new Map();
+  const suggestionCache = new Map();
+  const SUGGESTION_QUEUE_THRESHOLD = 2;
+  const SUGGESTION_RESULTS_LIMIT = 3;
   const DEFAULT_THEME_VARS = {
     '--bg-deep': '#0b0f17',
     '--bg-mid': '#151b29',
@@ -95,6 +108,7 @@ const App = (() => {
         SyncClient.updatePlayButton(state);
         handleLocalPlayerStateChange(state);
       },
+      onError: handleLocalPlayerError,
     });
   }
 
@@ -136,17 +150,392 @@ const App = (() => {
     if (statusEl) statusEl.textContent = message;
   }
 
+  function parseYouTubeInput(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return null;
+
+    const patterns = [
+      /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})/,
+      /^([a-zA-Z0-9_-]{11})$/,
+    ];
+
+    for (const pattern of patterns) {
+      const match = raw.match(pattern);
+      if (match) return match[1];
+    }
+    return null;
+  }
+
+  function parseYouTubePlaylistInput(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return null;
+
+    try {
+      const parsed = new URL(raw.startsWith('http') ? raw : `https://${raw}`);
+      return parsed.searchParams.get('list');
+    } catch (error) {
+      const match = raw.match(/[?&]list=([a-zA-Z0-9_-]+)/);
+      return match ? match[1] : null;
+    }
+  }
+
+  async function readApiResponse(response, fallbackMessage) {
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      return response.json();
+    }
+
+    const text = await response.text();
+    const error = new Error(fallbackMessage || 'The server returned an unexpected response.');
+    error.code = 'non_json_api_response';
+    error.responseText = text;
+    throw error;
+  }
+
   function setSearchLoading(loading) {
     searchIsLoading = loading;
     const resultsEl = document.getElementById('song-search-results');
     if (resultsEl) resultsEl.dataset.loading = loading ? 'true' : 'false';
   }
 
+  function getSongInputEl() {
+    return document.getElementById('song-search-input');
+  }
+
+  function getSongInputValue() {
+    return (getSongInputEl()?.value || '').trim();
+  }
+
+  function getSongInputTarget() {
+    if (songInputMode === 'link') {
+      const raw = getSongInputValue();
+      const playlistId = parseYouTubePlaylistInput(raw);
+      if (playlistId) {
+        return { kind: 'playlist', playlistId, raw };
+      }
+
+      const videoId = parseYouTubeInput(raw);
+      if (videoId) {
+        return { kind: 'video', videoId, raw };
+      }
+      return null;
+    }
+
+    if (!selectedSearchResult?.videoId) return null;
+    return { kind: 'video', videoId: selectedSearchResult.videoId, raw: selectedSearchResult.videoId };
+  }
+
+  function getSelectedVideoTarget() {
+    if (songInputMode === 'link') {
+      const target = getSongInputTarget();
+      return target?.kind === 'video' ? target.videoId : null;
+    }
+    return selectedSearchResult?.videoId || null;
+  }
+
+  function updateSongInputModeUI() {
+    const shell = document.querySelector('.song-search-shell');
+    const searchBtn = document.getElementById('song-mode-search-btn');
+    const linkBtn = document.getElementById('song-mode-link-btn');
+    const input = getSongInputEl();
+    if (!input) return;
+
+    if (shell) shell.dataset.mode = songInputMode;
+
+    const isSearch = songInputMode === 'search';
+    input.type = isSearch ? 'text' : 'url';
+    input.placeholder = isSearch
+      ? 'Search YouTube songs, artists, or soundtracks...'
+      : 'Paste a YouTube video or playlist link...';
+    input.autocomplete = 'off';
+
+    if (searchBtn) {
+      searchBtn.classList.toggle('active', isSearch);
+      searchBtn.setAttribute('aria-selected', isSearch ? 'true' : 'false');
+      searchBtn.disabled = youtubeSearchQuotaExhausted;
+    }
+
+    if (linkBtn) {
+      linkBtn.classList.toggle('active', !isSearch);
+      linkBtn.setAttribute('aria-selected', !isSearch ? 'true' : 'false');
+    }
+  }
+
+  function setSongInputMode(nextMode, { announce = false } = {}) {
+    if (!['search', 'link'].includes(nextMode)) return;
+    if (nextMode === 'search' && youtubeSearchQuotaExhausted) {
+      setSearchStatus('YouTube search is paused for now. Paste a YouTube link instead.');
+      if (announce) {
+        Notifications.info('Search quota is exhausted for now. Paste a link instead.', 2800);
+      }
+      return;
+    }
+
+    const input = getSongInputEl();
+    if (!input) {
+      songInputMode = nextMode;
+      return;
+    }
+
+    const previousValue = input.value;
+    if (songInputMode === 'search') {
+      searchInputDraft = previousValue;
+    } else {
+      linkInputDraft = previousValue;
+    }
+
+    songInputMode = nextMode;
+    updateSongInputModeUI();
+
+    input.value = nextMode === 'search' ? searchInputDraft : linkInputDraft;
+    const resultsEl = document.getElementById('song-search-results');
+    if (nextMode === 'link') {
+      if (searchDebounce) clearTimeout(searchDebounce);
+      if (searchAbortController) searchAbortController.abort();
+      if (resultsEl) {
+        resultsEl.classList.add('hidden');
+      }
+      setSearchStatus(
+        youtubeSearchQuotaExhausted
+          ? 'YouTube search is paused for now. Paste a YouTube link instead.'
+          : 'Paste a YouTube video or playlist link, then add it to the room.'
+      );
+    } else {
+      if (resultsEl && resultsEl.children.length > 0 && (searchInputDraft || searchQuery).trim().length >= MIN_SEARCH_CHARS) {
+        resultsEl.classList.remove('hidden');
+      }
+      setSearchStatus(
+        selectedSearchResult
+          ? `Selected: ${selectedSearchResult.title}`
+          : 'Start typing to search'
+      );
+    }
+
+    updateSearchActionButtons();
+    syncSmartSuggestions(currentQueueState);
+  }
+
+  function normalizeQueueState(queueState) {
+    if (Array.isArray(queueState)) {
+      return { current: null, upcoming: queueState, history: [] };
+    }
+
+    return {
+      current: queueState?.current || null,
+      upcoming: queueState?.upcoming || [],
+      history: queueState?.history || [],
+    };
+  }
+
+  function updateSmartSuggestions(nextState) {
+    if (typeof QueueUI !== 'undefined' && typeof QueueUI.setSuggestions === 'function') {
+      QueueUI.setSuggestions(nextState);
+    }
+  }
+
+  function clearSmartSuggestions() {
+    if (suggestionAbortController) {
+      suggestionAbortController.abort();
+      suggestionAbortController = null;
+    }
+    updateSmartSuggestions({ items: [], loading: false, hidden: true });
+  }
+
+  function isSearchPanelActive() {
+    if (songInputMode !== 'search') return false;
+    const input = document.getElementById('song-search-input');
+    const resultsEl = document.getElementById('song-search-results');
+    const query = (input?.value || searchQuery || '').trim();
+    const resultsVisible = Boolean(resultsEl && !resultsEl.classList.contains('hidden') && resultsEl.children.length);
+    return query.length >= MIN_SEARCH_CHARS || resultsVisible;
+  }
+
+  function buildSuggestionSeed(queueState) {
+    const currentItem = queueState?.current;
+    if (!currentItem) return '';
+    return [
+      currentItem.videoId || '',
+      currentItem.title || '',
+      currentItem.artist || '',
+    ].join('::');
+  }
+
+  function normalizeTrackText(text) {
+    return String(text || '')
+      .toLowerCase()
+      .replace(/\[[^\]]*\]/g, ' ')
+      .replace(/\([^)]*\)/g, ' ')
+      .replace(/&amp;|&#39;|&quot;/g, ' ')
+      .replace(/\b(official|video|lyrics?|lyrical|audio|full song|visualizer|topic|music|from|feat|ft)\b/g, ' ')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function buildTrackFingerprints(item) {
+    if (!item) {
+      return {
+        titleKey: '',
+        artistKey: '',
+        combinedKey: '',
+        titleWords: [],
+        prefixKey: '',
+      };
+    }
+
+    const titleKey = normalizeTrackText(item.title);
+    const artistKey = normalizeTrackText(item.artist || item.channelTitle || '');
+    const titleWords = titleKey.split(' ').filter(Boolean);
+    return {
+      titleKey,
+      artistKey,
+      combinedKey: [titleKey, artistKey].filter(Boolean).join('::'),
+      titleWords,
+      prefixKey: titleWords.slice(0, 5).join(' '),
+    };
+  }
+
+  function areTracksTooSimilar(base, candidate) {
+    if (!base?.titleKey || !candidate?.titleKey) return false;
+
+    if (base.combinedKey && base.combinedKey === candidate.combinedKey) return true;
+    if (base.titleKey === candidate.titleKey) return true;
+    if (base.prefixKey && candidate.prefixKey && base.prefixKey === candidate.prefixKey) return true;
+
+    const shorterTitle = base.titleKey.length <= candidate.titleKey.length ? base.titleKey : candidate.titleKey;
+    if (shorterTitle && shorterTitle.length >= 14) {
+      if (base.titleKey.includes(shorterTitle) || candidate.titleKey.includes(shorterTitle)) {
+        return true;
+      }
+    }
+
+    const baseWords = base.titleWords || [];
+    const candidateWords = candidate.titleWords || [];
+    const overlap = baseWords.filter((word) => candidateWords.includes(word));
+    const shorterWordCount = Math.min(baseWords.length, candidateWords.length);
+
+    if (
+      shorterWordCount >= 3 &&
+      overlap.length / shorterWordCount >= 0.68
+    ) {
+      return true;
+    }
+
+    if (base.artistKey && candidate.artistKey && base.artistKey === candidate.artistKey) {
+      if (overlap.length >= Math.min(3, shorterWordCount)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function filterSuggestionItems(items, queueState = currentQueueState) {
+    const takenIds = new Set();
+    const takenFingerprints = [];
+    [queueState.current, ...(queueState.upcoming || []), ...(queueState.history || [])].forEach((item) => {
+      if (item?.videoId) takenIds.add(item.videoId);
+      const fingerprints = buildTrackFingerprints(item);
+      if (fingerprints.titleKey) {
+        takenFingerprints.push(fingerprints);
+      }
+    });
+
+    const filtered = [];
+    for (const item of items || []) {
+      const videoId = String(item?.videoId || '').trim();
+      if (!videoId || takenIds.has(videoId)) continue;
+      const fingerprints = buildTrackFingerprints(item);
+      if (takenFingerprints.some((taken) => areTracksTooSimilar(taken, fingerprints))) {
+        continue;
+      }
+      takenIds.add(videoId);
+      if (fingerprints.titleKey) {
+        takenFingerprints.push(fingerprints);
+      }
+      filtered.push({
+        ...item,
+        artist: item.artist || item.channelTitle || '',
+      });
+      if (filtered.length >= SUGGESTION_RESULTS_LIMIT) break;
+    }
+    return filtered;
+  }
+
+  async function syncSmartSuggestions(queueState) {
+    currentQueueState = normalizeQueueState(queueState);
+    const { current, upcoming } = currentQueueState;
+
+    if (!current || upcoming.length > SUGGESTION_QUEUE_THRESHOLD || isSearchPanelActive()) {
+      clearSmartSuggestions();
+      return;
+    }
+
+    const seedKey = buildSuggestionSeed(currentQueueState);
+    if (!seedKey) {
+      clearSmartSuggestions();
+      return;
+    }
+
+    if (suggestionCache.has(seedKey)) {
+      const cachedItems = filterSuggestionItems(suggestionCache.get(seedKey), currentQueueState);
+      updateSmartSuggestions({
+        items: cachedItems,
+        loading: false,
+        hidden: cachedItems.length === 0,
+      });
+      return;
+    }
+
+    if (suggestionAbortController) {
+      suggestionAbortController.abort();
+    }
+
+    updateSmartSuggestions({ items: [], loading: true, hidden: false });
+    suggestionAbortController = new AbortController();
+    const controller = suggestionAbortController;
+
+    try {
+      const params = new URLSearchParams({
+        videoId: current.videoId || '',
+        title: current.title || '',
+        artist: current.artist || '',
+      });
+      const response = await fetch(`/api/youtube/suggestions?${params.toString()}`, {
+        signal: controller.signal,
+      });
+      const data = await readApiResponse(response, 'Suggestions need a quick server refresh right now.');
+
+      if (!response.ok) {
+        throw new Error(data?.error || 'Suggestion lookup unavailable');
+      }
+
+      suggestionCache.set(seedKey, data.items || []);
+      if (suggestionAbortController !== controller) return;
+
+      const filteredItems = filterSuggestionItems(data.items, currentQueueState);
+      updateSmartSuggestions({
+        items: filteredItems,
+        loading: false,
+        hidden: filteredItems.length === 0,
+      });
+    } catch (error) {
+      if (error.name === 'AbortError') return;
+      if (suggestionAbortController !== controller) return;
+      updateSmartSuggestions({ items: [], loading: false, hidden: true });
+    } finally {
+      if (suggestionAbortController === controller) {
+        suggestionAbortController = null;
+      }
+    }
+  }
+
   function updateSearchActionButtons() {
     const addBtn = document.getElementById('add-queue-btn');
     const playNextBtn = document.getElementById('play-next-btn');
-    if (addBtn) addBtn.disabled = !selectedSearchResult;
-    if (playNextBtn) playNextBtn.disabled = !selectedSearchResult || !isHost;
+    const target = getSongInputTarget();
+    if (addBtn) addBtn.disabled = !target;
+    if (playNextBtn) playNextBtn.disabled = !target || !isHost;
   }
 
   function refreshControllerAccess() {
@@ -158,6 +547,11 @@ const App = (() => {
     const overlayEl = document.getElementById('player-overlay');
     if (overlayEl) {
       overlayEl.classList.toggle('viewer-locked', !isHost);
+    }
+
+    const playlistPlayNowBtn = document.getElementById('playlist-import-play-now');
+    if (playlistPlayNowBtn) {
+      playlistPlayNowBtn.disabled = !isHost;
     }
 
     updateSearchActionButtons();
@@ -195,6 +589,27 @@ const App = (() => {
     activeThemeKey = 'default';
     themeRequestToken += 1;
     setThemeVars(DEFAULT_THEME_VARS);
+  }
+
+  function buildNowPlayingSubtitle(item) {
+    if (!item) return '';
+
+    if (item.playlistName) {
+      const position =
+        item.playlistTrackNumber && item.playlistLength
+          ? ` · ${item.playlistTrackNumber} of ${item.playlistLength}`
+          : '';
+      return `From ${item.playlistName}${position}`;
+    }
+
+    return item.artist || '';
+  }
+
+  function updateNowPlayingDisplay(item) {
+    const titleEl = document.getElementById('now-playing-title');
+    const subtitleEl = document.getElementById('now-playing-subtitle');
+    if (titleEl) titleEl.textContent = item?.title || 'Nothing playing';
+    if (subtitleEl) subtitleEl.textContent = buildNowPlayingSubtitle(item);
   }
 
   function thumbnailForVideo(videoId) {
@@ -514,6 +929,7 @@ const App = (() => {
   function showPlaybackUnlockPrompt() {
     if (!shouldOfferPlaybackUnlock()) return;
     if (roomPlaybackState !== 'playing' || !roomCurrentVideoId) return;
+    if (locallyBlockedVideoIds.has(roomCurrentVideoId)) return;
 
     const unlockBtn = document.getElementById('player-unlock-btn');
     const overlayEl = document.getElementById('player-overlay');
@@ -536,6 +952,10 @@ const App = (() => {
   function schedulePlaybackUnlockCheck(delayMs = 1800) {
     clearPlaybackUnlockCheck();
     if (!shouldOfferPlaybackUnlock() || roomPlaybackState !== 'playing' || !roomCurrentVideoId) {
+      hidePlaybackUnlockPrompt();
+      return;
+    }
+    if (locallyBlockedVideoIds.has(roomCurrentVideoId)) {
       hidePlaybackUnlockPrompt();
       return;
     }
@@ -567,6 +987,7 @@ const App = (() => {
   function attemptPlaybackUnlock() {
     if (!shouldOfferPlaybackUnlock()) return;
     if (roomPlaybackState !== 'playing' || !roomCurrentVideoId) return;
+    if (locallyBlockedVideoIds.has(roomCurrentVideoId)) return;
 
     const targetTime = getExpectedRoomTime();
     if (Player.getCurrentVideoId() !== roomCurrentVideoId) {
@@ -581,9 +1002,44 @@ const App = (() => {
     schedulePlaybackUnlockCheck(2200);
   }
 
+  function handleLocalPlayerError({ code, videoId } = {}) {
+    const currentVideoId = videoId || Player.getCurrentVideoId() || roomCurrentVideoId;
+    if (currentVideoId) {
+      locallyBlockedVideoIds.add(currentVideoId);
+    }
+
+    clearPlaybackUnlockCheck();
+    hidePlaybackUnlockPrompt();
+    SyncClient.updatePlayButton('paused');
+
+    const isHardBlock = code === 101 || code === 150 || code === 5;
+    if (!isHardBlock || !currentVideoId || currentVideoId !== roomCurrentVideoId) {
+      return;
+    }
+
+    const errorKey = `${currentVideoId}:${code}:${isHost ? 'host' : 'guest'}`;
+    if (lastHandledPlayerErrorKey === errorKey) return;
+    lastHandledPlayerErrorKey = errorKey;
+
+    if (isHost) {
+      if (currentQueueState.upcoming?.length) {
+        Notifications.info('That track is blocked here. Skipping to the next one.', 2600);
+      } else {
+        Notifications.warning('That track is blocked here and there is nothing else queued.');
+      }
+      send({ type: 'SKIP_TRACK' });
+      return;
+    }
+
+    Notifications.warning('This track is blocked on this device. The room may continue on other devices.');
+  }
+
   function updateRoomPlaybackContext(type, msg = {}) {
     switch (type) {
       case 'PLAY':
+        if (msg.videoId && msg.videoId !== roomCurrentVideoId) {
+          lastHandledPlayerErrorKey = '';
+        }
         roomPlaybackState = 'playing';
         roomCurrentVideoId = msg.videoId || roomCurrentVideoId;
         roomReferenceTime = typeof msg.startTime === 'number' ? msg.startTime : 0;
@@ -615,6 +1071,7 @@ const App = (() => {
         roomCurrentVideoId = null;
         roomReferenceTime = 0;
         roomReferenceStartedAt = null;
+        lastHandledPlayerErrorKey = '';
         clearPlaybackUnlockCheck();
         hidePlaybackUnlockPrompt();
         break;
@@ -658,7 +1115,7 @@ const App = (() => {
     if (!preserveQuery) {
       const input = document.getElementById('song-search-input');
       const results = document.getElementById('song-search-results');
-      if (input) input.value = '';
+      if (input && songInputMode === 'search') input.value = '';
       if (results) {
         results.innerHTML = '';
         results.classList.add('hidden');
@@ -668,6 +1125,8 @@ const App = (() => {
       searchHasMore = false;
       setSearchStatus('Start typing to search');
     }
+
+    syncSmartSuggestions(currentQueueState);
   }
 
   function renderSearchResults(items, append = false) {
@@ -715,6 +1174,7 @@ const App = (() => {
   }
 
   async function runSongSearch(query, { append = false } = {}) {
+    if (songInputMode !== 'search') return;
     const trimmedQuery = query.trim();
     const resultsEl = document.getElementById('song-search-results');
 
@@ -729,6 +1189,7 @@ const App = (() => {
         resultsEl.classList.add('hidden');
       }
       setSearchStatus('Start typing to search');
+      syncSmartSuggestions(currentQueueState);
       return;
     }
 
@@ -745,6 +1206,7 @@ const App = (() => {
         }
       }
       setSearchStatus(`Type at least ${MIN_SEARCH_CHARS} characters to search`);
+      syncSmartSuggestions(currentQueueState);
       return;
     }
 
@@ -785,10 +1247,12 @@ const App = (() => {
       const response = await fetch(`/api/youtube/search?${params.toString()}`, {
         signal: searchAbortController.signal,
       });
-      const data = await response.json();
+      const data = await readApiResponse(response, 'Search needs a quick server refresh right now.');
 
       if (!response.ok) {
-        throw new Error(data?.error || 'Search unavailable right now');
+        const error = new Error(data?.error || 'Search unavailable right now');
+        error.code = data?.code || '';
+        throw error;
       }
 
       searchCache.set(cacheKey, {
@@ -805,29 +1269,157 @@ const App = (() => {
       );
     } catch (error) {
       if (error.name === 'AbortError') return;
+      if (error.code === 'youtube_quota_exceeded') {
+        youtubeSearchQuotaExhausted = true;
+        setSongInputMode('link');
+        setSearchStatus('YouTube search is paused for now. Paste a YouTube link instead.');
+        Notifications.info('Search quota is exhausted for now. Switched to Paste Link.', 3200);
+        return;
+      }
       setSearchStatus(error.message || 'Search unavailable right now');
     } finally {
       setSearchLoading(false);
+      syncSmartSuggestions(currentQueueState);
     }
   }
 
   function queueSelectedSearchResult(type) {
-    if (!selectedSearchResult) return;
+    const target = getSongInputTarget();
+    if (!target) {
+      Notifications.info(
+        songInputMode === 'link'
+          ? 'Paste a valid YouTube link first'
+          : 'Select a result first'
+      );
+      return;
+    }
     if (type === 'PLAY_NEXT' && !isHost) {
       Notifications.info('Only the controller can Play Next');
       return;
     }
 
-    send({ type, videoUrl: selectedSearchResult.videoId });
+    if (target.kind === 'playlist') {
+      previewPlaylistImport(target.playlistId);
+      return;
+    }
+
+    send({ type, videoUrl: target.videoId });
     Notifications.success(
       type === 'PLAY_NEXT' ? 'Song added to play next' : 'Song added to queue',
       2200
     );
     setSearchStatus(
-      type === 'PLAY_NEXT'
-        ? 'Added to Play Next. Search results are still here for your next pick.'
-        : 'Added to queue. Search results are still here for your next pick.'
+      songInputMode === 'link'
+        ? (type === 'PLAY_NEXT'
+          ? 'Link added to Play Next. Paste another YouTube link anytime.'
+          : 'Link added to queue. Paste another YouTube link anytime.')
+        : (type === 'PLAY_NEXT'
+          ? 'Added to Play Next. Search results are still here for your next pick.'
+          : 'Added to queue. Search results are still here for your next pick.')
     );
+  }
+
+  async function previewPlaylistImport(playlistId) {
+    if (!playlistId) return;
+
+    if (playlistPreviewAbortController) {
+      playlistPreviewAbortController.abort();
+    }
+    playlistPreviewAbortController = new AbortController();
+
+    try {
+      const params = new URLSearchParams({ playlistId });
+      const response = await fetch(`/api/youtube/playlist-preview?${params.toString()}`, {
+        signal: playlistPreviewAbortController.signal,
+      });
+      const data = await readApiResponse(
+        response,
+        'Playlist import needs a server restart. Restart Jammin, refresh, and paste the playlist again.'
+      );
+      if (!response.ok) {
+        throw new Error(data?.error || 'Unable to preview that playlist right now');
+      }
+
+      pendingPlaylistImport = data;
+      openPlaylistImportSheet(data);
+    } catch (error) {
+      if (error.name === 'AbortError') return;
+      Notifications.error(error.message || 'Unable to preview that playlist right now');
+    } finally {
+      playlistPreviewAbortController = null;
+    }
+  }
+
+  function openPlaylistImportSheet(preview) {
+    const modal = document.getElementById('playlist-import-modal');
+    const cover = document.getElementById('playlist-import-cover');
+    const title = document.getElementById('playlist-import-title');
+    const meta = document.getElementById('playlist-import-meta');
+    const count = document.getElementById('playlist-import-count');
+    const list = document.getElementById('playlist-import-preview-list');
+    const playNowBtn = document.getElementById('playlist-import-play-now');
+
+    if (cover) {
+      cover.src = preview.thumbnail || '';
+      cover.alt = preview.title || 'Playlist artwork';
+    }
+    if (title) title.textContent = preview.title || 'Playlist';
+    if (meta) meta.textContent = preview.channelTitle || 'YouTube';
+    if (count) {
+      count.textContent = preview.isTruncated
+        ? `Importing the first ${preview.importCount} tracks`
+        : `${preview.importCount} tracks ready for the room`;
+    }
+    if (list) {
+      list.innerHTML = '';
+      (preview.previewTracks || []).slice(0, 4).forEach((track, index) => {
+        const row = document.createElement('div');
+        row.className = 'playlist-import-track';
+        row.innerHTML = `
+          <span class="playlist-import-track-index">${index + 1}</span>
+          <div class="playlist-import-track-copy">
+            <div class="playlist-import-track-title">${escapeHtml(track.title)}</div>
+            <div class="playlist-import-track-meta">${escapeHtml(track.artist || 'YouTube')}</div>
+          </div>
+        `;
+        list.appendChild(row);
+      });
+    }
+    if (playNowBtn) playNowBtn.disabled = !isHost;
+    if (modal) modal.classList.remove('hidden');
+  }
+
+  function closePlaylistImportSheet() {
+    pendingPlaylistImport = null;
+    const modal = document.getElementById('playlist-import-modal');
+    if (modal) modal.classList.add('hidden');
+  }
+
+  function confirmPlaylistImport(mode) {
+    if (!pendingPlaylistImport?.playlistId) return;
+    if (mode === 'play-next' && !isHost) {
+      Notifications.info('Only the controller can play a playlist next');
+      return;
+    }
+
+    send({
+      type: mode === 'play-next' ? 'PLAYLIST_PLAY_NEXT' : 'ADD_PLAYLIST_TO_QUEUE',
+      playlistId: pendingPlaylistImport.playlistId,
+    });
+
+    Notifications.success(
+      mode === 'play-next'
+        ? `Playlist queued next: ${pendingPlaylistImport.title}`
+        : `Playlist added: ${pendingPlaylistImport.title}`,
+      2400
+    );
+
+    setSearchStatus(
+      mode === 'play-next'
+        ? 'Playlist is lined up next. Paste another link or search for more.'
+        : 'Playlist added to the room. Paste another link or search for more.'
+    );
+    closePlaylistImportSheet();
   }
 
   function openTransferControls(targetUserId, targetUsername) {
@@ -986,6 +1578,8 @@ const App = (() => {
       case 'QUEUE_UPDATED':
         QueueUI.update(msg.queue);
         syncThemeFromQueue(msg.queue);
+        syncSmartSuggestions(msg.queue);
+        updateNowPlayingDisplay(msg.queue?.current || null);
         break;
       case 'PARTICIPANT_UPDATE':
         syncParticipantsState(msg.participants);
@@ -1002,12 +1596,13 @@ const App = (() => {
       case 'QUEUE_EMPTY':
         updateRoomPlaybackContext('QUEUE_EMPTY');
         resetReactiveTheme();
+        currentQueueState = { current: null, upcoming: [], history: [] };
+        clearSmartSuggestions();
         Notifications.info('Queue is empty. Add more tracks to keep going.');
         Player.showPlaceholder();
         SyncClient.updatePlayButton('paused');
         {
-          const titleEl = document.getElementById('now-playing-title');
-          if (titleEl) titleEl.textContent = 'Nothing playing';
+          updateNowPlayingDisplay(null);
         }
         break;
       case 'ERROR':
@@ -1068,9 +1663,14 @@ const App = (() => {
     // Full state from server on join
     if (msg.queue) QueueUI.update(msg.queue);
     if (msg.queue) syncThemeFromQueue(msg.queue);
+    if (msg.queue) syncSmartSuggestions(msg.queue);
+    updateNowPlayingDisplay(msg.queue?.current || msg.currentVideo || null);
     if (msg.participants) syncParticipantsState(msg.participants);
     if (msg.chat) Chat.setHistory(msg.chat);
 
+    if (msg.currentVideo?.videoId && msg.currentVideo.videoId !== roomCurrentVideoId) {
+      lastHandledPlayerErrorKey = '';
+    }
     roomCurrentVideoId = msg.currentVideo?.videoId || null;
     roomPlaybackState = msg.playbackState || 'idle';
     roomReferenceTime = typeof msg.currentTime === 'number' ? msg.currentTime : 0;
@@ -1078,9 +1678,6 @@ const App = (() => {
 
     // If there's a current video, sync to it
     if (msg.currentVideo && msg.playbackState !== 'idle') {
-      const titleEl = document.getElementById('now-playing-title');
-      if (titleEl) titleEl.textContent = msg.currentVideo.title || 'Playing';
-
       if (msg.playbackState === 'playing') {
         Player.loadVideo(msg.currentVideo.videoId, msg.currentTime || 0);
         SyncClient.updatePlayButton('playing');
@@ -1212,12 +1809,18 @@ const App = (() => {
     const playNextBtn = document.getElementById('play-next-btn');
     const searchInput = document.getElementById('song-search-input');
     const searchResults = document.getElementById('song-search-results');
+    const modeToggle = document.getElementById('song-input-mode-toggle');
     const transferModal = document.getElementById('control-transfer-modal');
     const transferCancelBtn = document.getElementById('control-transfer-cancel');
     const transferConfirmBtn = document.getElementById('control-transfer-confirm');
+    const playlistImportModal = document.getElementById('playlist-import-modal');
+    const playlistImportCancelBtn = document.getElementById('playlist-import-cancel');
+    const playlistImportQueueBtn = document.getElementById('playlist-import-add-queue');
+    const playlistImportPlayNowBtn = document.getElementById('playlist-import-play-now');
     const unlockBtn = document.getElementById('player-unlock-btn');
 
     refreshControllerAccess();
+    updateSongInputModeUI();
 
     addBtn.addEventListener('click', () => {
       queueSelectedSearchResult('ADD_TO_QUEUE');
@@ -1243,22 +1846,71 @@ const App = (() => {
       });
     }
 
+    if (playlistImportCancelBtn) {
+      playlistImportCancelBtn.addEventListener('click', closePlaylistImportSheet);
+    }
+
+    if (playlistImportQueueBtn) {
+      playlistImportQueueBtn.addEventListener('click', () => {
+        confirmPlaylistImport('queue');
+      });
+    }
+
+    if (playlistImportPlayNowBtn) {
+      playlistImportPlayNowBtn.addEventListener('click', () => {
+        confirmPlaylistImport('play-next');
+      });
+    }
+
+    if (playlistImportModal) {
+      playlistImportModal.addEventListener('click', (e) => {
+        if (e.target === playlistImportModal) {
+          closePlaylistImportSheet();
+        }
+      });
+    }
+
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
         closeTransferControls();
+        closePlaylistImportSheet();
       }
     });
 
     if (searchInput) {
       searchInput.addEventListener('input', () => {
-        const query = searchInput.value;
+        if (songInputMode === 'search') {
+          searchInputDraft = searchInput.value;
+          const query = searchInput.value;
+          syncSmartSuggestions(currentQueueState);
+          if (searchDebounce) clearTimeout(searchDebounce);
+          searchDebounce = setTimeout(() => {
+            runSongSearch(query);
+          }, SEARCH_DEBOUNCE_MS);
+          return;
+        }
+
+        linkInputDraft = searchInput.value;
         if (searchDebounce) clearTimeout(searchDebounce);
-        searchDebounce = setTimeout(() => {
-          runSongSearch(query);
-        }, SEARCH_DEBOUNCE_MS);
+        updateSearchActionButtons();
+        const target = getSongInputTarget();
+        setSearchStatus(
+          target?.kind === 'playlist'
+            ? 'Playlist detected. Review it before adding it to the room.'
+            : target?.kind === 'video'
+              ? 'Valid YouTube link. Queue it or play it next.'
+              : 'Paste a full YouTube link, playlist link, or 11-character video ID.'
+        );
       });
 
       searchInput.addEventListener('keydown', (e) => {
+        if (songInputMode === 'link') {
+          if (e.key === 'Enter' && getSongInputTarget()) {
+            addBtn.click();
+          }
+          return;
+        }
+
         if (e.key === 'Enter') {
           if (selectedSearchResult) {
             addBtn.click();
@@ -1268,6 +1920,16 @@ const App = (() => {
           if (searchDebounce) clearTimeout(searchDebounce);
           runSongSearch(searchInput.value);
         }
+      });
+    }
+
+    if (modeToggle) {
+      modeToggle.addEventListener('click', (e) => {
+        const button = e.target.closest('.song-input-mode-btn');
+        if (!button) return;
+        const nextMode = button.dataset.mode;
+        if (!nextMode) return;
+        setSongInputMode(nextMode, { announce: true });
       });
     }
 
