@@ -162,6 +162,27 @@
             </button>
           </div>
         </div>
+
+        <div class="spotify-import-bar glass-panel">
+          <div class="spotify-import-brand">
+            <span class="spotify-import-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="11" fill="#1ED760"></circle>
+                <path d="M7.4 9.2c3.4-1 6.9-.8 10.2.8" stroke="#07140c" stroke-width="1.8" stroke-linecap="round"></path>
+                <path d="M8.3 12c2.6-.7 5.2-.5 7.6.6" stroke="#07140c" stroke-width="1.65" stroke-linecap="round"></path>
+                <path d="M9.3 14.6c1.8-.4 3.5-.3 5 .4" stroke="#07140c" stroke-width="1.5" stroke-linecap="round"></path>
+              </svg>
+            </span>
+            <div class="spotify-import-brand-copy">
+              <div class="spotify-import-label">Spotify Playlist</div>
+              <div class="spotify-import-status" id="spotify-import-status">Paste a public Spotify playlist link to map it into YouTube matches.</div>
+            </div>
+          </div>
+          <div class="spotify-import-shell">
+            <input type="url" id="spotify-playlist-input" placeholder="Paste a Spotify playlist link..." autocomplete="off">
+            <button id="spotify-review-btn" class="btn btn-spotify" type="button">Review Playlist</button>
+          </div>
+        </div>
       </div>
 
       <!-- Side Panel -->
@@ -293,6 +314,56 @@
         <button class="btn btn-ghost" id="playlist-import-add-queue" type="button">Add Playlist</button>
         <button class="btn btn-accent" id="playlist-import-play-now" type="button">Play Playlist Next</button>
       </div>
+    </div>
+  </div>
+
+  <div class="spotify-import-modal hidden" id="spotify-import-modal">
+    <div class="spotify-import-card glass-panel" role="dialog" aria-modal="true" aria-labelledby="spotify-import-title">
+      <div class="spotify-import-header">
+        <div class="spotify-import-heading">
+          <div class="spotify-import-kicker">Spotify To Jammin</div>
+          <div class="spotify-import-title" id="spotify-import-title">Playlist review</div>
+          <div class="spotify-import-meta" id="spotify-import-meta">Spotify playlist</div>
+          <div class="spotify-import-count" id="spotify-import-count">Review matches before sending them into the room</div>
+        </div>
+        <button class="spotify-import-close" id="spotify-import-close" type="button" aria-label="Close Spotify playlist review">✕</button>
+      </div>
+
+      <div class="spotify-import-hero">
+        <img class="spotify-import-cover" id="spotify-import-cover" alt="Spotify playlist artwork">
+        <div class="spotify-import-hero-copy">
+          <div class="spotify-import-hero-title">Review every match before import</div>
+          <div class="spotify-import-hero-body">Jammin maps each Spotify track to a playable YouTube video, highlights the shaky matches, and lets you fix them before anything touches the queue.</div>
+        </div>
+      </div>
+
+      <div class="spotify-review-list" id="spotify-review-list"></div>
+
+      <div class="spotify-import-footer">
+        <button class="btn btn-ghost hidden" id="spotify-import-load-more" type="button">Load more songs</button>
+        <div class="spotify-import-actions">
+          <button class="btn btn-ghost" id="spotify-import-add-btn" type="button">Add All to Queue</button>
+          <button class="btn btn-spotify" id="spotify-import-replace-btn" type="button">Replace Queue</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="spotify-correction-modal hidden" id="spotify-correction-modal">
+    <div class="spotify-correction-card glass-panel" role="dialog" aria-modal="true" aria-labelledby="spotify-correction-title">
+      <div class="spotify-correction-header">
+        <div>
+          <div class="spotify-import-kicker">Manual Match</div>
+          <div class="spotify-correction-title" id="spotify-correction-title">Find a YouTube match</div>
+          <div class="spotify-correction-meta" id="spotify-correction-meta">Search YouTube to replace the current pick.</div>
+        </div>
+        <button class="spotify-import-close" id="spotify-correction-close" type="button" aria-label="Close manual match">✕</button>
+      </div>
+      <div class="spotify-correction-search">
+        <input type="text" id="spotify-correction-search-input" placeholder="Search YouTube for a better match..." autocomplete="off">
+        <button class="btn btn-spotify" id="spotify-correction-search-btn" type="button">Search</button>
+      </div>
+      <div class="spotify-correction-results" id="spotify-correction-results"></div>
     </div>
   </div>
 

@@ -17,6 +17,7 @@ function createQueueItem(videoInfo, addedBy) {
     playlistName: videoInfo.playlistName || '',
     playlistThumbnail: videoInfo.playlistThumbnail || '',
     playlistChannelTitle: videoInfo.playlistChannelTitle || '',
+    playlistSource: videoInfo.playlistSource || 'youtube',
     playlistTrackNumber: videoInfo.playlistTrackNumber || null,
     playlistLength: videoInfo.playlistLength || null,
     addedAt: Date.now(),
@@ -35,6 +36,7 @@ function createPlaylistItems(playlistInfo, addedBy) {
       playlistName: playlistInfo.title || 'Playlist',
       playlistThumbnail: playlistInfo.thumbnail || videoInfo.thumbnail || '',
       playlistChannelTitle: playlistInfo.channelTitle || '',
+      playlistSource: playlistInfo.source || 'youtube',
       playlistTrackNumber: index + 1,
       playlistLength: totalTracks,
     }, addedBy)
@@ -105,6 +107,28 @@ function playNextPlaylist(session, playlistInfo, addedBy) {
   }
 
   session.queue.unshift(...items);
+  broadcastQueueUpdate(session);
+  return { autoPlay: false, item: null };
+}
+
+function replaceQueueWithPlaylist(session, playlistInfo, addedBy) {
+  const items = createPlaylistItems(playlistInfo, addedBy);
+  session.queue = [];
+
+  if (items.length === 0) {
+    broadcastQueueUpdate(session);
+    return { autoPlay: false, item: null };
+  }
+
+  session.vibeSource = items[0].videoId;
+
+  if (session.playbackState === 'idle' && !session.currentVideo) {
+    const [firstItem, ...rest] = items;
+    if (rest.length) session.queue.push(...rest);
+    return { autoPlay: true, item: firstItem };
+  }
+
+  session.queue.push(...items);
   broadcastQueueUpdate(session);
   return { autoPlay: false, item: null };
 }
@@ -231,6 +255,7 @@ function formatQueueItem(item) {
     playlistName: item.playlistName || '',
     playlistThumbnail: item.playlistThumbnail || '',
     playlistChannelTitle: item.playlistChannelTitle || '',
+    playlistSource: item.playlistSource || 'youtube',
     playlistTrackNumber: item.playlistTrackNumber || null,
     playlistLength: item.playlistLength || null,
   };
@@ -278,6 +303,7 @@ module.exports = {
   playNext,
   addPlaylistToQueue,
   playNextPlaylist,
+  replaceQueueWithPlaylist,
   reorderQueue,
   removeFromQueue,
   removePlaylistGroup,

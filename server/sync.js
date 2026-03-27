@@ -223,6 +223,21 @@ function handleSkipTrack(session, userId) {
   });
 }
 
+function handlePlayerError(session, userId, report = {}) {
+  if (!session.currentVideo) return false;
+
+  const errorCode = Number(report.code);
+  const reportedVideoId = String(report.videoId || '').trim();
+  const isHardPlayerFailure = errorCode === 5 || errorCode === 101 || errorCode === 150;
+
+  if (!isHardPlayerFailure) return false;
+  if (session.host !== userId) return false;
+  if (reportedVideoId && reportedVideoId !== session.currentVideo.videoId) return false;
+
+  handleSkipTrack(session, userId);
+  return true;
+}
+
 function handlePrevTrack(session, userId) {
   if (session.host !== userId) return;
 
@@ -253,5 +268,6 @@ module.exports = {
   handleAdEnd,
   handleGoLive,
   handleSkipTrack,
+  handlePlayerError,
   handlePrevTrack,
 };

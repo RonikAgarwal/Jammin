@@ -14,6 +14,26 @@ const Player = (() => {
   let seekDetectInterval = null;
   let pendingAction = null;
 
+  function ensurePlayerMount() {
+    let mount = document.getElementById('youtube-player');
+    if (mount) return mount;
+
+    const container = document.getElementById('player-container');
+    if (!container) return null;
+
+    mount = document.createElement('div');
+    mount.id = 'youtube-player';
+
+    const overlay = document.getElementById('player-overlay');
+    if (overlay) {
+      container.insertBefore(mount, overlay);
+    } else {
+      container.appendChild(mount);
+    }
+
+    return mount;
+  }
+
   function init(callbacks = {}) {
     onReadyCallback = callbacks.onReady || null;
     onEndedCallback = callbacks.onEnded || null;
@@ -33,9 +53,12 @@ const Player = (() => {
   }
 
   function createPlayer() {
+    const mount = ensurePlayerMount();
+    if (!mount) return;
+
     const currentOrigin = window.location.origin;
     const widgetReferrer = window.location.href;
-    player = new YT.Player('youtube-player', {
+    player = new YT.Player(mount, {
       height: '100%',
       width: '100%',
       host: 'https://www.youtube.com',
@@ -123,6 +146,14 @@ const Player = (() => {
         code: errorCode,
         videoId: currentVideoId,
       });
+    }
+
+    if (errorCode === 101 || errorCode === 150 || errorCode === 5) {
+      // Rebuild the iframe after hard failures so the bad embed does not keep
+      // sitting in the surface and poisoning the next playback attempt.
+      setTimeout(() => {
+        resetPlayerSurface();
+      }, 0);
     }
 
     if (errorCode === 101 || errorCode === 150) {
@@ -232,6 +263,30 @@ const Player = (() => {
     }
   }
 
+  function resetPlayerSurface() {
+    stopTimeReporting();
+    isReady = false;
+
+    try {
+      if (player && typeof player.destroy === 'function') {
+        player.destroy();
+      }
+    } catch (error) {
+      console.warn('Unable to destroy YouTube player cleanly:', error);
+    }
+
+    player = null;
+
+    const staleMount = document.getElementById('youtube-player');
+    if (staleMount) {
+      staleMount.remove();
+    }
+
+    if (window.YT && window.YT.Player) {
+      createPlayer();
+    }
+  }
+
   function hidePlaceholder() {
     const ph = document.getElementById('player-placeholder');
     const titleEl = document.getElementById('player-placeholder-title');
@@ -276,6 +331,7 @@ const Player = (() => {
     getState,
     getCurrentVideoId,
     playWithDelay,
+    resetPlayerSurface,
     showPlaceholder,
     hidePlaceholder,
   };

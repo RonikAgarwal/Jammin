@@ -16,13 +16,18 @@ smooth sync (no annoying jumps)
 queue system (like shared playlist)
 handle ads + lag properly
 clean lofi-style UI
+spotify playlist import with match review
 
 Run locally
 git clone https://github.com/RonikAgarwal/Jammin.git
 cd Jammin
 npm install
-npm run dev
-(backend runs separately if needed)
+npm start
+
+Create a `.env` with:
+- `YOUTUBE_API_KEY`
+- `SPOTIFY_CLIENT_ID`
+- `SPOTIFY_CLIENT_SECRET`
 
 Idea
 Just wanted something where:

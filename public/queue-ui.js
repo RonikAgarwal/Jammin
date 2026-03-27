@@ -221,7 +221,7 @@ const QueueUI = (() => {
       ${isHost ? `
         <div class="queue-row-actions">
           ${createRowMenuHtml([
-            { action: 'play-now', label: options.hideMenuLabel ? 'Play this track now' : 'Play now' },
+            { action: 'play-next', label: options.hideMenuLabel ? 'Play this track next' : 'Play next' },
             { action: 'remove', label: 'Remove' },
           ])}
         </div>
@@ -243,6 +243,7 @@ const QueueUI = (() => {
     const firstItem = group.items[0];
     const isHost = window.App && window.App.getIsHost();
     const isExpanded = expandedPlaylistGroups.has(group.groupId);
+    const badgeLabel = firstItem.playlistSource === 'spotify' ? 'Spotify' : 'Playlist';
     const previewTitles = group.items
       .slice(0, 3)
       .map((item) => item.title)
@@ -258,7 +259,7 @@ const QueueUI = (() => {
           thumbnail: firstItem.playlistThumbnail || firstItem.thumbnail,
           videoId: firstItem.videoId,
         }, 'queue-row-thumb')}
-        <span class="queue-playlist-badge">Playlist</span>
+        <span class="queue-playlist-badge ${firstItem.playlistSource === 'spotify' ? 'queue-playlist-badge-spotify' : ''}">${escapeHtml(badgeLabel)}</span>
       </div>
       <div class="queue-row-content">
         <div class="queue-row-title-wrap">
@@ -330,10 +331,34 @@ const QueueUI = (() => {
   }
 
   function bindUpcomingRow(el, item, index, isHost) {
+    if (isHost) {
+      const directPlayTargets = el.querySelectorAll('.queue-row-thumb, .queue-row-title');
+      directPlayTargets.forEach((target) => {
+        target.classList.add('queue-row-direct-play');
+        target.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (window.App) {
+            App.send({ type: 'PLAY_SELECTED', itemId: item.id });
+          }
+        });
+      });
+    } else {
+      el.querySelectorAll('.queue-row-direct-play').forEach((target) => {
+        target.classList.remove('queue-row-direct-play');
+      });
+    }
+
     if (!isHost) return;
     bindRowMenu(el, {
-      'play-now': () => {
-        if (window.App) App.send({ type: 'PLAY_SELECTED', itemId: item.id });
+      'play-next': () => {
+        if (!window.App) return;
+        if (typeof index !== 'number' || index <= 0) return;
+
+        App.send({
+          type: 'REORDER_QUEUE',
+          fromIndex: index,
+          toIndex: 0,
+        });
       },
       remove: () => {
         if (window.App) App.send({ type: 'REMOVE_FROM_QUEUE', itemId: item.id });
@@ -346,9 +371,13 @@ const QueueUI = (() => {
 
     const handle = el.querySelector('.queue-drag-handle');
     if (!handle) return;
+    handle.addEventListener('click', (e) => {
+      e.stopPropagation();
+    });
     handle.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
       e.preventDefault();
+      e.stopPropagation();
 
       dragState = {
         kind: config.kind,
