@@ -4,8 +4,12 @@ const App = (() => {
   let ws = null;
   let userId = null;
   let sessionCode = null;
+  let reconnectToken = '';
   let isHost = false;
   let username = 'Anonymous';
+  let playbackMode = 'disabled';
+  let pendingJoinPlaybackMode = 'viewer';
+  let pendingJoinCode = '';
 
   // Seek bar variables
   let seekBarEl = null;
@@ -36,27 +40,42 @@ const App = (() => {
   let spotifyCorrectionQuery = '';
   let spotifyLoadMorePending = false;
   let activeSpotifyCorrectionTrackId = null;
+  let spotifyAuthState = {
+    connected: false,
+    displayName: '',
+    checked: false,
+  };
   let currentQueueState = { current: null, upcoming: [], history: [] };
   let suggestionAbortController = null;
   let pendingControlTransfer = null;
   let roomPlaybackState = 'idle';
   let roomCurrentVideoId = null;
+  let roomCurrentTrack = null;
+  let roomDurationSeconds = 0;
   let roomReferenceTime = 0;
   let roomReferenceStartedAt = null;
   let playbackUnlockTimer = null;
   let blockedTrackRecoveryTimer = null;
   let blockedTrackRecoveryVideoId = null;
+  let trackMetaAbortController = null;
+  let trackMetaPendingVideoId = '';
   let hasPlaybackUnlock = false;
   const locallyBlockedVideoIds = new Set();
   let lastHandledPlayerErrorKey = '';
   let themeRequestToken = 0;
   let activeThemeKey = 'default';
   const themeCache = new Map();
-  const SEARCH_DEBOUNCE_MS = 550;
-  const MIN_SEARCH_CHARS = 3;
+  const SEARCH_DEBOUNCE_MS = 725;
+  const MIN_SEARCH_CHARS = 4;
+  const SEARCH_CACHE_VERSION = 'music-rank-v2';
+  const SPOTIFY_IMPORT_ENABLED = false;
   const SPOTIFY_REVIEW_CONFIDENCE_THRESHOLD = 68;
+  const SPOTIFY_PLAYLIST_DRAFT_STORAGE_KEY = 'jammin_spotify_playlist_draft';
+  const SPOTIFY_REVIEW_AFTER_AUTH_STORAGE_KEY = 'jammin_spotify_review_after_auth';
+  const ACTIVE_SESSION_STORAGE_KEY = 'jammin_active_session';
   const searchCache = new Map();
   const suggestionCache = new Map();
+  const trackMetaCache = new Map();
   const SUGGESTION_QUEUE_THRESHOLD = 2;
   const SUGGESTION_RESULTS_LIMIT = 3;
   const DEFAULT_THEME_VARS = {
@@ -96,7 +115,17 @@ const App = (() => {
 
     // Bind UI events
     bindLandingEvents();
+    applyFeatureFlags();
     bindSessionEvents();
+    if (SPOTIFY_IMPORT_ENABLED) {
+      restoreSpotifyDraftState();
+      const spotifyRedirectState = consumeSpotifyAuthRedirectState();
+      refreshSpotifyAuthState({
+        autoResumeReview: spotifyRedirectState.status === 'connected',
+        transferToken: spotifyRedirectState.transferToken || '',
+      });
+    }
+    attemptSavedSessionResume();
 
     // Init player with callbacks
     Player.init({
@@ -128,15 +157,21 @@ const App = (() => {
     if (seekUpdateInterval) return;
     seekUpdateInterval = setInterval(() => {
       if (isDraggingSeek || !seekBarEl) return;
-      
-      const currentTime = Player.getCurrentTime();
-      const duration = Player.getDuration();
-      
+
+      const currentTime = isLocalPlaybackEnabled() ? Player.getCurrentTime() : getExpectedRoomTime();
+      const duration = isLocalPlaybackEnabled() ? Player.getDuration() : roomDurationSeconds;
+
+      if (seekCurrentEl) seekCurrentEl.textContent = formatTime(currentTime);
+
       if (duration > 0) {
         seekBarEl.max = duration;
-        seekBarEl.value = currentTime;
-        if (seekCurrentEl) seekCurrentEl.textContent = formatTime(currentTime);
+        seekBarEl.value = Math.min(currentTime, duration);
         if (seekTotalEl) seekTotalEl.textContent = formatTime(duration);
+      } else {
+        const fallbackMax = Math.max(1, Math.ceil(currentTime || 1));
+        seekBarEl.max = fallbackMax;
+        seekBarEl.value = Math.min(currentTime, fallbackMax);
+        if (seekTotalEl) seekTotalEl.textContent = roomCurrentTrack?.duration ? roomCurrentTrack.duration : '--:--';
       }
     }, 500);
   }
@@ -228,6 +263,426 @@ const App = (() => {
   function setSpotifyImportStatus(message) {
     const statusEl = document.getElementById('spotify-import-status');
     if (statusEl) statusEl.textContent = message;
+  }
+
+  function applyFeatureFlags() {
+    document.body.dataset.spotifyImport = SPOTIFY_IMPORT_ENABLED ? 'on' : 'off';
+
+    const spotifyBar = document.querySelector('.spotify-import-bar');
+    if (spotifyBar) {
+      spotifyBar.hidden = !SPOTIFY_IMPORT_ENABLED;
+    }
+
+    const spotifyImportModal = document.getElementById('spotify-import-modal');
+    if (spotifyImportModal && !SPOTIFY_IMPORT_ENABLED) {
+      spotifyImportModal.classList.add('hidden');
+    }
+
+    const spotifyCorrectionModal = document.getElementById('spotify-correction-modal');
+    if (spotifyCorrectionModal && !SPOTIFY_IMPORT_ENABLED) {
+      spotifyCorrectionModal.classList.add('hidden');
+    }
+  }
+
+  function saveSpotifyDraftState({ shouldAutoReview = false } = {}) {
+    try {
+      const rawValue = String(document.getElementById('spotify-playlist-input')?.value || spotifyPlaylistDraft || '').trim();
+      if (rawValue) {
+        window.localStorage.setItem(SPOTIFY_PLAYLIST_DRAFT_STORAGE_KEY, rawValue);
+      }
+      if (shouldAutoReview) {
+        window.localStorage.setItem(SPOTIFY_REVIEW_AFTER_AUTH_STORAGE_KEY, '1');
+      } else {
+        window.localStorage.removeItem(SPOTIFY_REVIEW_AFTER_AUTH_STORAGE_KEY);
+      }
+    } catch (error) {
+      // Ignore storage failures and keep the in-memory draft.
+    }
+  }
+
+  function restoreSpotifyDraftState() {
+    try {
+      const savedDraft = window.localStorage.getItem(SPOTIFY_PLAYLIST_DRAFT_STORAGE_KEY) || '';
+      if (savedDraft && !spotifyPlaylistDraft) {
+        spotifyPlaylistDraft = savedDraft;
+      }
+      const input = document.getElementById('spotify-playlist-input');
+      if (input && spotifyPlaylistDraft && !input.value) {
+        input.value = spotifyPlaylistDraft;
+      }
+    } catch (error) {
+      // Ignore storage failures and fall back to the in-memory draft.
+    }
+  }
+
+  function clearSpotifyReviewAfterAuthFlag() {
+    try {
+      window.localStorage.removeItem(SPOTIFY_REVIEW_AFTER_AUTH_STORAGE_KEY);
+    } catch (error) {
+      // Ignore storage failures.
+    }
+  }
+
+  function getSpotifyReviewAfterAuthFlag() {
+    try {
+      return window.localStorage.getItem(SPOTIFY_REVIEW_AFTER_AUTH_STORAGE_KEY) === '1';
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function getSpotifyReturnToPath() {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('spotify');
+    url.searchParams.delete('spotify_message');
+    return `${url.pathname}${url.search}${url.hash}`;
+  }
+
+  function updateSpotifyAuthButton() {
+    const button = document.getElementById('spotify-auth-btn');
+    if (!button) return;
+
+    button.classList.toggle('is-connected', spotifyAuthState.connected);
+    button.textContent = spotifyAuthState.connected ? 'Connected' : 'Connect';
+    button.title = spotifyAuthState.connected
+      ? `Spotify connected${spotifyAuthState.displayName ? ` as ${spotifyAuthState.displayName}` : ''}`
+      : 'Connect Spotify to import playlists from your account';
+  }
+
+  function syncSpotifyImportStatusToState() {
+    const playlistId = parseSpotifyPlaylistInput(document.getElementById('spotify-playlist-input')?.value || spotifyPlaylistDraft || '');
+    if (!spotifyAuthState.connected) {
+      setSpotifyImportStatus(
+        playlistId
+          ? 'Spotify playlist detected. Connect Spotify once to review it from your account.'
+          : 'Connect Spotify to review playlists from your account.'
+      );
+      return;
+    }
+
+    if (playlistId) {
+      setSpotifyImportStatus('Spotify playlist detected. Review matches before adding it to Jammin.');
+      return;
+    }
+
+    setSpotifyImportStatus(
+      spotifyAuthState.displayName
+        ? `Connected as ${spotifyAuthState.displayName}. Paste a playlist link to review it before import.`
+        : 'Spotify connected. Paste a playlist link to review it before import.'
+    );
+  }
+
+  function beginSpotifyAuth({ autoReview = false, authUrl = '' } = {}) {
+    saveSpotifyDraftState({ shouldAutoReview: autoReview });
+    const fallbackAuthUrl = `/api/spotify/auth/start?returnTo=${encodeURIComponent(getSpotifyReturnToPath())}`;
+    window.location.href = authUrl || fallbackAuthUrl;
+  }
+
+  function saveActiveSessionState() {
+    if (!sessionCode || !username || !reconnectToken) return;
+    try {
+      window.localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, JSON.stringify({
+        code: sessionCode,
+        username,
+        playbackMode: playbackMode === 'viewer' ? 'viewer' : 'player',
+        reconnectToken,
+      }));
+    } catch (error) {
+      // Ignore storage issues; in-memory reconnect still works.
+    }
+  }
+
+  function clearActiveSessionState() {
+    try {
+      window.localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
+    } catch (error) {
+      // Ignore storage issues.
+    }
+  }
+
+  function readActiveSessionState() {
+    try {
+      const raw = window.localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed?.code || !parsed?.username || !parsed?.reconnectToken) return null;
+      return {
+        code: String(parsed.code).trim().toUpperCase(),
+        username: String(parsed.username).trim() || 'Anonymous',
+        playbackMode: parsed.playbackMode === 'viewer' ? 'viewer' : 'player',
+        reconnectToken: String(parsed.reconnectToken).trim(),
+      };
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function attemptSavedSessionResume() {
+    if (sessionCode || (ws && ws.readyState === WebSocket.OPEN)) return;
+    const saved = readActiveSessionState();
+    if (!saved) return;
+
+    username = saved.username;
+    pendingJoinPlaybackMode = saved.playbackMode;
+    reconnectToken = saved.reconnectToken;
+
+    connect();
+    waitForConnection(() => {
+      send({
+        type: 'JOIN_SESSION',
+        code: saved.code,
+        username,
+        playbackMode: pendingJoinPlaybackMode,
+        reconnectToken,
+      });
+    });
+  }
+
+  function consumeSpotifyAuthRedirectState() {
+    const url = new URL(window.location.href);
+    const status = url.searchParams.get('spotify');
+    const message = url.searchParams.get('spotify_message');
+    const transferToken = url.searchParams.get('spotify_transfer');
+    if (!status && !transferToken) {
+      return { status: '', transferToken: '' };
+    }
+
+    url.searchParams.delete('spotify');
+    url.searchParams.delete('spotify_message');
+    url.searchParams.delete('spotify_transfer');
+    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+
+    if (status === 'connected') {
+      Notifications.success('Spotify connected', 1800);
+    } else if (status === 'error') {
+      Notifications.error(message || 'Spotify sign-in did not finish cleanly.');
+    }
+
+    return {
+      status: status || '',
+      transferToken: transferToken || '',
+    };
+  }
+
+  async function refreshSpotifyAuthState({ autoResumeReview = false, transferToken = '' } = {}) {
+    updateSpotifyAuthButton();
+    restoreSpotifyDraftState();
+
+    try {
+      if (transferToken) {
+        const claimResponse = await fetch(`/api/spotify/session/claim?token=${encodeURIComponent(transferToken)}`);
+        const claimData = await readApiResponse(
+          claimResponse,
+          'Spotify auth handoff needs a quick server refresh. Restart Jammin and reconnect Spotify.'
+        );
+        if (!claimResponse.ok) {
+          throw new Error(claimData?.error || 'Spotify sign-in handoff expired. Connect Spotify again.');
+        }
+      }
+
+      const response = await fetch('/api/spotify/session');
+      const data = await readApiResponse(
+        response,
+        'Spotify auth status needs a quick server refresh. Restart Jammin and reconnect Spotify.'
+      );
+
+      spotifyAuthState.connected = Boolean(data.connected);
+      spotifyAuthState.displayName = data.displayName || '';
+      spotifyAuthState.checked = true;
+      updateSpotifyAuthButton();
+      syncSpotifyImportStatusToState();
+
+      if (spotifyAuthState.connected && autoResumeReview && getSpotifyReviewAfterAuthFlag()) {
+        const draft = String(document.getElementById('spotify-playlist-input')?.value || spotifyPlaylistDraft || '').trim();
+        const playlistId = parseSpotifyPlaylistInput(draft);
+        clearSpotifyReviewAfterAuthFlag();
+        if (playlistId) {
+          previewSpotifyPlaylistImport(playlistId);
+        }
+      }
+    } catch (error) {
+      spotifyAuthState.connected = false;
+      spotifyAuthState.displayName = '';
+      spotifyAuthState.checked = true;
+      updateSpotifyAuthButton();
+      syncSpotifyImportStatusToState();
+    }
+  }
+
+  function isLocalPlaybackEnabled() {
+    return playbackMode === 'player';
+  }
+
+  function parseDurationToSeconds(value) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return Math.max(0, value);
+    }
+
+    const raw = String(value || '').trim();
+    if (!raw) return 0;
+    const parts = raw.split(':').map((part) => Number(part));
+    if (parts.some((part) => Number.isNaN(part))) return 0;
+
+    if (parts.length === 2) {
+      return (parts[0] * 60) + parts[1];
+    }
+
+    if (parts.length === 3) {
+      return (parts[0] * 3600) + (parts[1] * 60) + parts[2];
+    }
+
+    return 0;
+  }
+
+  function resolveTrackDurationSeconds(item) {
+    if (!item) return 0;
+    if (typeof item.durationSeconds === 'number') return item.durationSeconds;
+    if (typeof item.durationMs === 'number') return Math.round(item.durationMs / 1000);
+    return parseDurationToSeconds(item.duration);
+  }
+
+  function resolveTrackThumbnail(item) {
+    if (!item) return '';
+    return item.thumbnail || thumbnailForVideo(item.videoId);
+  }
+
+  function updateRoomTrackContext(track) {
+    roomCurrentTrack = track ? { ...roomCurrentTrack, ...track } : null;
+    roomDurationSeconds = resolveTrackDurationSeconds(roomCurrentTrack);
+    if (roomCurrentTrack?.videoId && (!roomDurationSeconds || !roomCurrentTrack.thumbnail || !roomCurrentTrack.artist)) {
+      ensureCurrentTrackMetadata(roomCurrentTrack.videoId);
+    }
+  }
+
+  async function ensureCurrentTrackMetadata(videoId) {
+    const safeVideoId = String(videoId || '').trim();
+    if (!safeVideoId) return;
+
+    const applyMeta = (meta) => {
+      const activeVideoId = currentQueueState?.current?.videoId || roomCurrentVideoId || roomCurrentTrack?.videoId || '';
+      if (!meta || (activeVideoId && activeVideoId !== safeVideoId)) return;
+      roomCurrentTrack = {
+        ...roomCurrentTrack,
+        ...meta,
+      };
+      roomDurationSeconds = resolveTrackDurationSeconds(roomCurrentTrack);
+      if (currentQueueState?.current?.videoId === safeVideoId) {
+        currentQueueState.current = {
+          ...currentQueueState.current,
+          ...meta,
+        };
+      }
+      updateNowPlayingDisplay(currentQueueState.current || roomCurrentTrack);
+      renderPlaybackSurface();
+    };
+
+    if (trackMetaCache.has(safeVideoId)) {
+      applyMeta(trackMetaCache.get(safeVideoId));
+      return;
+    }
+
+    if (trackMetaPendingVideoId === safeVideoId) {
+      return;
+    }
+
+    if (trackMetaAbortController) {
+      trackMetaAbortController.abort();
+    }
+    trackMetaPendingVideoId = safeVideoId;
+    trackMetaAbortController = new AbortController();
+
+    try {
+      const params = new URLSearchParams({ videoId: safeVideoId });
+      const response = await fetch(`/api/youtube/video-meta?${params.toString()}`, {
+        signal: trackMetaAbortController.signal,
+      });
+      const data = await readApiResponse(response, 'Track details need a quick server refresh right now.');
+      if (!response.ok) {
+        throw new Error(data?.error || 'Unable to load track details right now');
+      }
+      trackMetaCache.set(safeVideoId, data);
+      applyMeta(data);
+    } catch (error) {
+      if (error.name === 'AbortError') return;
+    } finally {
+      if (trackMetaPendingVideoId === safeVideoId) {
+        trackMetaPendingVideoId = '';
+      }
+      trackMetaAbortController = null;
+    }
+  }
+
+  function resetViewerPlaceholder() {
+    const placeholder = document.getElementById('player-placeholder');
+    const defaultEl = document.getElementById('player-placeholder-default');
+    const viewerCard = document.getElementById('viewer-mode-card');
+    if (placeholder) placeholder.classList.remove('viewer-mode');
+    if (defaultEl) defaultEl.classList.remove('hidden');
+    if (viewerCard) viewerCard.classList.add('hidden');
+  }
+
+  function showViewerPlaceholder(track) {
+    const placeholder = document.getElementById('player-placeholder');
+    const defaultEl = document.getElementById('player-placeholder-default');
+    const viewerCard = document.getElementById('viewer-mode-card');
+    const thumbEl = document.getElementById('viewer-mode-thumb');
+    const titleEl = document.getElementById('viewer-mode-title');
+    const metaEl = document.getElementById('viewer-mode-meta');
+
+    if (!placeholder || !viewerCard) return;
+
+    placeholder.classList.remove('hidden');
+    placeholder.classList.add('viewer-mode');
+    defaultEl?.classList.add('hidden');
+    viewerCard.classList.remove('hidden');
+
+    if (thumbEl) {
+      const thumb = resolveTrackThumbnail(track);
+      thumbEl.src = thumb;
+      thumbEl.alt = track?.title ? `${track.title} artwork` : 'Current track artwork';
+      thumbEl.classList.toggle('hidden', !thumb);
+    }
+    if (titleEl) {
+      titleEl.textContent = track?.title || 'Waiting for the next track';
+    }
+    if (metaEl) {
+      metaEl.textContent = track?.artist || track?.channelTitle || 'Listening on the shared speaker.';
+    }
+  }
+
+  function showStandardPlaceholder(title = 'Pick a track to begin', detail = '') {
+    resetViewerPlaceholder();
+    Player.showPlaceholder(title, detail);
+  }
+
+  function renderPlaybackSurface() {
+    if (isLocalPlaybackEnabled()) {
+      resetViewerPlaceholder();
+      if (!roomCurrentVideoId && !currentQueueState.current) {
+        showStandardPlaceholder('Pick a track to begin', '');
+      }
+      return;
+    }
+
+    const track = currentQueueState.current || roomCurrentTrack;
+    if (track?.videoId || track?.title) {
+      showViewerPlaceholder(track);
+    } else {
+      showStandardPlaceholder(
+        'Waiting for the room',
+        'This device is following the shared speaker. Once playback starts, the current track will show up here.'
+      );
+    }
+  }
+
+  function setSessionPlaybackMode(nextMode = 'player') {
+    playbackMode = nextMode === 'viewer' ? 'viewer' : 'player';
+    document.body.dataset.playbackMode = playbackMode;
+    Player.setPlaybackMode(playbackMode);
+    clearPlaybackUnlockCheck();
+    hidePlaybackUnlockPrompt();
+    renderPlaybackSurface();
+    refreshControllerAccess();
   }
 
   function getSongInputEl() {
@@ -576,9 +1031,15 @@ const App = (() => {
     const playPauseBtn = document.getElementById('play-pause-btn');
     if (playPauseBtn) playPauseBtn.disabled = !isHost;
 
+    const prevBtn = document.getElementById('prev-btn');
+    if (prevBtn) prevBtn.disabled = !isHost;
+
+    const nextBtn = document.getElementById('next-btn');
+    if (nextBtn) nextBtn.disabled = !isHost;
+
     const overlayEl = document.getElementById('player-overlay');
     if (overlayEl) {
-      overlayEl.classList.toggle('viewer-locked', !isHost);
+      overlayEl.classList.toggle('viewer-locked', !isHost || !isLocalPlaybackEnabled());
     }
 
     const playlistPlayNowBtn = document.getElementById('playlist-import-play-now');
@@ -595,6 +1056,7 @@ const App = (() => {
     if (typeof QueueUI !== 'undefined' && typeof QueueUI.refreshPermissions === 'function') {
       QueueUI.refreshPermissions();
     }
+    renderPlaybackSurface();
   }
 
   function deviceNeedsPlaybackUnlock() {
@@ -606,7 +1068,7 @@ const App = (() => {
   }
 
   function shouldOfferPlaybackUnlock() {
-    return deviceNeedsPlaybackUnlock() && !hasPlaybackUnlock;
+    return isLocalPlaybackEnabled() && deviceNeedsPlaybackUnlock() && !hasPlaybackUnlock;
   }
 
   function markPlaybackUnlocked() {
@@ -1040,6 +1502,8 @@ const App = (() => {
   }
 
   function handleLocalPlayerStateChange(state) {
+    if (!isLocalPlaybackEnabled()) return;
+
     if (state === 'playing') {
       if (shouldOfferPlaybackUnlock() && roomCurrentVideoId) {
         markPlaybackUnlocked();
@@ -1055,6 +1519,7 @@ const App = (() => {
   }
 
   function attemptPlaybackUnlock() {
+    if (!isLocalPlaybackEnabled()) return;
     if (!shouldOfferPlaybackUnlock()) return;
     if (roomPlaybackState !== 'playing' || !roomCurrentVideoId) return;
     if (locallyBlockedVideoIds.has(roomCurrentVideoId)) return;
@@ -1124,6 +1589,13 @@ const App = (() => {
         }
         roomPlaybackState = 'playing';
         roomCurrentVideoId = msg.videoId || roomCurrentVideoId;
+        updateRoomTrackContext({
+          videoId: msg.videoId || roomCurrentVideoId,
+          title: msg.title,
+          artist: msg.artist,
+          thumbnail: msg.thumbnail,
+          duration: msg.duration,
+        });
         roomReferenceTime = typeof msg.startTime === 'number' ? msg.startTime : 0;
         roomReferenceStartedAt = Date.now();
         break;
@@ -1151,7 +1623,9 @@ const App = (() => {
       case 'QUEUE_EMPTY':
         roomPlaybackState = 'idle';
         roomCurrentVideoId = null;
+        updateRoomTrackContext(null);
         roomReferenceTime = 0;
+        roomDurationSeconds = 0;
         roomReferenceStartedAt = null;
         lastHandledPlayerErrorKey = '';
         clearBlockedTrackRecovery();
@@ -1303,7 +1777,7 @@ const App = (() => {
     }
 
     searchQuery = trimmedQuery;
-    const cacheKey = `${trimmedQuery.toLowerCase()}::${append ? searchNextPageToken || '' : ''}`;
+    const cacheKey = `${SEARCH_CACHE_VERSION}::${trimmedQuery.toLowerCase()}::${append ? searchNextPageToken || '' : ''}`;
     if (searchCache.has(cacheKey)) {
       const cached = searchCache.get(cacheKey);
       renderSearchResults(cached.items || [], append);
@@ -1553,6 +2027,11 @@ const App = (() => {
       );
 
       if (!response.ok) {
+        if (response.status === 401 && data?.code === 'spotify_auth_required') {
+          setSpotifyImportStatus(data?.error || 'Connect Spotify to review playlists from your account.');
+          beginSpotifyAuth({ autoReview: true, authUrl: data?.authUrl || '' });
+          return;
+        }
         throw new Error(data?.error || 'Unable to review that Spotify playlist right now');
       }
 
@@ -1938,6 +2417,42 @@ const App = (() => {
     Notifications.info(`${msg.toUsername || 'Someone'} now has playback controls`);
   }
 
+  function handleViewerPlaybackMessage(msg) {
+    renderPlaybackSurface();
+
+    if (msg.type === 'PLAY' || msg.type === 'RESUME' || msg.type === 'SYNC_TO') {
+      SyncClient.updatePlayButton('playing');
+      return;
+    }
+
+    if (msg.type === 'PAUSE') {
+      SyncClient.updatePlayButton('paused');
+      return;
+    }
+
+    if (msg.type === 'QUEUE_EMPTY') {
+      SyncClient.updatePlayButton('paused');
+    }
+  }
+
+  function applyPlaybackMessage(msg) {
+    updateRoomPlaybackContext(msg.type, msg);
+    updateNowPlayingDisplay(currentQueueState.current || roomCurrentTrack);
+
+    if (isLocalPlaybackEnabled()) {
+      SyncClient.handleMessage(msg);
+      if (shouldOfferPlaybackUnlock() && roomPlaybackState === 'playing') {
+        schedulePlaybackUnlockCheck();
+      } else {
+        hidePlaybackUnlockPrompt();
+      }
+      return;
+    }
+
+    hidePlaybackUnlockPrompt();
+    handleViewerPlaybackMessage(msg);
+  }
+
   // ---- WebSocket Connection ----
 
   function connect() {
@@ -2008,7 +2523,13 @@ const App = (() => {
       // Re-join session if we were in one
       if (sessionCode && username) {
         setTimeout(() => {
-          send({ type: 'JOIN_SESSION', code: sessionCode, username });
+          send({
+            type: 'JOIN_SESSION',
+            code: sessionCode,
+            username,
+            playbackMode: playbackMode === 'viewer' ? 'viewer' : 'player',
+            reconnectToken,
+          });
         }, 500);
       }
     }, delay);
@@ -2041,10 +2562,14 @@ const App = (() => {
             clearBlockedTrackRecovery();
           }
         }
+        currentQueueState = normalizeQueueState(msg.queue);
+        roomCurrentVideoId = currentQueueState.current?.videoId || roomCurrentVideoId;
+        updateRoomTrackContext(currentQueueState.current || null);
         QueueUI.update(msg.queue);
         syncThemeFromQueue(msg.queue);
         syncSmartSuggestions(msg.queue);
         updateNowPlayingDisplay(msg.queue?.current || null);
+        renderPlaybackSurface();
         break;
       case 'PARTICIPANT_UPDATE':
         syncParticipantsState(msg.participants);
@@ -2064,13 +2589,19 @@ const App = (() => {
         currentQueueState = { current: null, upcoming: [], history: [] };
         clearSmartSuggestions();
         Notifications.info('Queue is empty. Add more tracks to keep going.');
-        Player.showPlaceholder();
+        showStandardPlaceholder();
         SyncClient.updatePlayButton('paused');
         {
           updateNowPlayingDisplay(null);
         }
+        renderPlaybackSurface();
         break;
       case 'ERROR':
+        if (String(msg.message || '') === 'Session not found') {
+          clearActiveSessionState();
+          sessionCode = null;
+          reconnectToken = '';
+        }
         Notifications.error(msg.message);
         break;
       case 'CHAT_MESSAGE':
@@ -2079,20 +2610,16 @@ const App = (() => {
 
       case 'CUE_VIDEO':
         if (msg.videoId) roomCurrentVideoId = msg.videoId;
-        SyncClient.handleMessage(msg);
+        if (isLocalPlaybackEnabled()) {
+          SyncClient.handleMessage(msg);
+        }
         break;
       case 'PLAY':
       case 'SEEK':
       case 'PAUSE':
       case 'RESUME':
       case 'SYNC_TO':
-        updateRoomPlaybackContext(msg.type, msg);
-        SyncClient.handleMessage(msg);
-        if (shouldOfferPlaybackUnlock() && roomPlaybackState === 'playing') {
-          schedulePlaybackUnlockCheck();
-        } else {
-          hidePlaybackUnlockPrompt();
-        }
+        applyPlaybackMessage(msg);
         break;
       case 'LAG_INFO':
         SyncClient.handleMessage(msg);
@@ -2104,11 +2631,14 @@ const App = (() => {
     userId = msg.userId;
     sessionCode = msg.code;
     username = msg.username;
+    reconnectToken = msg.reconnectToken || reconnectToken;
+    setSessionPlaybackMode(msg.playbackMode || 'player');
     Chat.setSessionContext({ userId, username, sessionCode });
     if (msg.chat) Chat.setHistory(msg.chat);
 
     switchToSessionView(msg.code, msg.username);
     syncParticipantsState(msg.participants || []);
+    saveActiveSessionState();
     Notifications.success('Session ready. Share the code.');
   }
 
@@ -2116,17 +2646,27 @@ const App = (() => {
     userId = msg.userId;
     sessionCode = msg.code;
     username = msg.username;
+    reconnectToken = msg.reconnectToken || reconnectToken;
+    setSessionPlaybackMode(msg.playbackMode || pendingJoinPlaybackMode || 'viewer');
     Chat.setSessionContext({ userId, username, sessionCode });
     if (msg.chat) Chat.setHistory(msg.chat);
 
     switchToSessionView(msg.code, msg.username);
     syncParticipantsState(msg.participants || []);
-    Notifications.success('Joined the room');
+    saveActiveSessionState();
+    Notifications.success(msg.resumed ? 'Back in the room' : 'Joined the room');
   }
 
   function handleSessionState(msg) {
     // Full state from server on join
-    if (msg.queue) QueueUI.update(msg.queue);
+    roomCurrentVideoId = msg.currentVideo?.videoId || msg.queue?.current?.videoId || roomCurrentVideoId;
+    if (msg.queue) {
+      currentQueueState = normalizeQueueState(msg.queue);
+      QueueUI.update(msg.queue);
+      updateRoomTrackContext(currentQueueState.current || msg.currentVideo || null);
+    } else if (msg.currentVideo) {
+      updateRoomTrackContext(msg.currentVideo);
+    }
     if (msg.queue) syncThemeFromQueue(msg.queue);
     if (msg.queue) syncSmartSuggestions(msg.queue);
     updateNowPlayingDisplay(msg.queue?.current || msg.currentVideo || null);
@@ -2139,13 +2679,13 @@ const App = (() => {
     if (blockedTrackRecoveryVideoId && msg.currentVideo?.videoId !== blockedTrackRecoveryVideoId) {
       clearBlockedTrackRecovery();
     }
-    roomCurrentVideoId = msg.currentVideo?.videoId || null;
+    roomCurrentVideoId = msg.currentVideo?.videoId || roomCurrentVideoId || null;
     roomPlaybackState = msg.playbackState || 'idle';
     roomReferenceTime = typeof msg.currentTime === 'number' ? msg.currentTime : 0;
     roomReferenceStartedAt = roomPlaybackState === 'playing' ? Date.now() : null;
 
     // If there's a current video, sync to it
-    if (msg.currentVideo && msg.playbackState !== 'idle') {
+    if (msg.currentVideo && msg.playbackState !== 'idle' && isLocalPlaybackEnabled()) {
       if (msg.playbackState === 'playing') {
         Player.loadVideo(msg.currentVideo.videoId, msg.currentTime || 0);
         SyncClient.updatePlayButton('playing');
@@ -2153,6 +2693,8 @@ const App = (() => {
         Player.cueVideo(msg.currentVideo.videoId, msg.currentTime || 0);
         SyncClient.updatePlayButton('paused');
       }
+    } else if (!isLocalPlaybackEnabled()) {
+      SyncClient.updatePlayButton(msg.playbackState === 'playing' ? 'playing' : 'paused');
     }
 
     if (shouldOfferPlaybackUnlock() && roomPlaybackState === 'playing' && roomCurrentVideoId) {
@@ -2160,6 +2702,8 @@ const App = (() => {
     } else {
       hidePlaybackUnlockPrompt();
     }
+
+    renderPlaybackSurface();
   }
 
   // ---- UI Switching ----
@@ -2184,6 +2728,39 @@ const App = (() => {
     refreshControllerAccess();
   }
 
+  function openJoinModePrompt(code) {
+    pendingJoinCode = String(code || '').trim().toUpperCase();
+    const modal = document.getElementById('join-mode-modal');
+    const options = document.querySelectorAll('.join-mode-option');
+    if (!modal || !options.length) return;
+
+    options.forEach((option) => {
+      const isActive = option.dataset.mode === pendingJoinPlaybackMode;
+      option.classList.toggle('active', isActive);
+      option.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    });
+
+    modal.classList.remove('hidden');
+  }
+
+  function closeJoinModePrompt() {
+    const modal = document.getElementById('join-mode-modal');
+    if (modal) modal.classList.add('hidden');
+    pendingJoinCode = '';
+  }
+
+  function confirmJoinModeSelection() {
+    if (!pendingJoinCode) return;
+
+    username = document.getElementById('username-input')?.value.trim() || 'Anonymous';
+    const code = pendingJoinCode;
+    closeJoinModePrompt();
+    connect();
+    waitForConnection(() => {
+      send({ type: 'JOIN_SESSION', code, username, playbackMode: pendingJoinPlaybackMode });
+    });
+  }
+
   // ---- Landing Events ----
 
   function bindLandingEvents() {
@@ -2191,6 +2768,10 @@ const App = (() => {
     const joinBtn = document.getElementById('join-session-btn');
     const usernameInput = document.getElementById('username-input');
     const codeInput = document.getElementById('session-code-input');
+    const joinModeModal = document.getElementById('join-mode-modal');
+    const joinModeOptions = document.getElementById('join-mode-options');
+    const joinModeCancelBtn = document.getElementById('join-mode-cancel');
+    const joinModeConfirmBtn = document.getElementById('join-mode-confirm');
 
     createBtn.addEventListener('click', () => {
       username = usernameInput.value.trim() || 'Anonymous';
@@ -2202,21 +2783,45 @@ const App = (() => {
     });
 
     joinBtn.addEventListener('click', () => {
-      username = usernameInput.value.trim() || 'Anonymous';
       const code = codeInput.value.trim().toUpperCase();
       if (!code) {
         Notifications.warning('Enter a session code');
         return;
       }
-      connect();
-      waitForConnection(() => {
-        send({ type: 'JOIN_SESSION', code, username });
-      });
+      openJoinModePrompt(code);
     });
 
     // Enter key on code input
     codeInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') joinBtn.click();
+    });
+
+    if (joinModeOptions) {
+      joinModeOptions.addEventListener('click', (e) => {
+        const option = e.target.closest('.join-mode-option');
+        if (!option) return;
+        pendingJoinPlaybackMode = option.dataset.mode === 'player' ? 'player' : 'viewer';
+        joinModeOptions.querySelectorAll('.join-mode-option').forEach((button) => {
+          const isActive = button === option;
+          button.classList.toggle('active', isActive);
+          button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+        });
+      });
+    }
+
+    joinModeCancelBtn?.addEventListener('click', closeJoinModePrompt);
+    joinModeConfirmBtn?.addEventListener('click', confirmJoinModeSelection);
+
+    joinModeModal?.addEventListener('click', (e) => {
+      if (e.target === joinModeModal) {
+        closeJoinModePrompt();
+      }
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        closeJoinModePrompt();
+      }
     });
   }
 
@@ -2253,7 +2858,12 @@ const App = (() => {
           return;
         }
         const val = parseFloat(seekBarEl.value);
-        Player.seekTo(val);
+        if (isLocalPlaybackEnabled()) {
+          Player.seekTo(val);
+        } else {
+          updateRoomPlaybackContext('SEEK', { seekTime: val });
+          renderPlaybackSurface();
+        }
         broadcastHostSeek(val);
         isDraggingSeek = false;
       });
@@ -2286,6 +2896,7 @@ const App = (() => {
     const playlistImportQueueBtn = document.getElementById('playlist-import-add-queue');
     const playlistImportPlayNowBtn = document.getElementById('playlist-import-play-now');
     const spotifyPlaylistInput = document.getElementById('spotify-playlist-input');
+    const spotifyAuthBtn = document.getElementById('spotify-auth-btn');
     const spotifyReviewBtn = document.getElementById('spotify-review-btn');
     const spotifyImportModal = document.getElementById('spotify-import-modal');
     const spotifyImportCloseBtn = document.getElementById('spotify-import-close');
@@ -2301,7 +2912,9 @@ const App = (() => {
 
     refreshControllerAccess();
     updateSongInputModeUI();
-    setSpotifyImportStatus('Paste a public Spotify playlist link to map it into YouTube matches.');
+    if (SPOTIFY_IMPORT_ENABLED) {
+      syncSpotifyImportStatusToState();
+    }
 
     addBtn.addEventListener('click', () => {
       queueSelectedSearchResult('ADD_TO_QUEUE');
@@ -2351,27 +2964,38 @@ const App = (() => {
       });
     }
 
-    if (spotifyReviewBtn) {
+    if (SPOTIFY_IMPORT_ENABLED && spotifyReviewBtn) {
       spotifyReviewBtn.addEventListener('click', () => {
         const playlistId = parseSpotifyPlaylistInput(spotifyPlaylistInput?.value || '');
         if (!playlistId) {
           Notifications.info('Paste a valid Spotify playlist link first');
-          setSpotifyImportStatus('Paste a public Spotify playlist link to review it before import.');
+          syncSpotifyImportStatusToState();
+          return;
+        }
+        if (!spotifyAuthState.connected) {
+          beginSpotifyAuth({ autoReview: true });
           return;
         }
         previewSpotifyPlaylistImport(playlistId);
       });
     }
 
-    if (spotifyPlaylistInput) {
+    if (SPOTIFY_IMPORT_ENABLED && spotifyAuthBtn) {
+      spotifyAuthBtn.addEventListener('click', () => {
+        beginSpotifyAuth({ autoReview: false });
+      });
+    }
+
+    if (SPOTIFY_IMPORT_ENABLED && spotifyPlaylistInput) {
       spotifyPlaylistInput.addEventListener('input', () => {
         spotifyPlaylistDraft = spotifyPlaylistInput.value;
+        saveSpotifyDraftState({ shouldAutoReview: getSpotifyReviewAfterAuthFlag() });
         const playlistId = parseSpotifyPlaylistInput(spotifyPlaylistInput.value);
-        setSpotifyImportStatus(
-          playlistId
-            ? 'Spotify playlist detected. Review matches before adding it to Jammin.'
-            : 'Paste a public Spotify playlist link to map it into YouTube matches.'
-        );
+        if (playlistId && spotifyAuthState.connected) {
+          setSpotifyImportStatus('Spotify playlist detected. Review matches before adding it to Jammin.');
+        } else {
+          syncSpotifyImportStatusToState();
+        }
       });
 
       spotifyPlaylistInput.addEventListener('keydown', (e) => {
@@ -2382,19 +3006,19 @@ const App = (() => {
       });
     }
 
-    if (spotifyImportCloseBtn) {
+    if (SPOTIFY_IMPORT_ENABLED && spotifyImportCloseBtn) {
       spotifyImportCloseBtn.addEventListener('click', closeSpotifyImportSheet);
     }
 
-    if (spotifyImportAddBtn) {
+    if (SPOTIFY_IMPORT_ENABLED && spotifyImportAddBtn) {
       spotifyImportAddBtn.addEventListener('click', () => confirmSpotifyImport('queue'));
     }
 
-    if (spotifyImportReplaceBtn) {
+    if (SPOTIFY_IMPORT_ENABLED && spotifyImportReplaceBtn) {
       spotifyImportReplaceBtn.addEventListener('click', () => confirmSpotifyImport('replace'));
     }
 
-    if (spotifyImportLoadMoreBtn) {
+    if (SPOTIFY_IMPORT_ENABLED && spotifyImportLoadMoreBtn) {
       spotifyImportLoadMoreBtn.addEventListener('click', () => {
         if (pendingSpotifyImport?.hasMore) {
           previewSpotifyPlaylistImport(pendingSpotifyImport.playlistId, { append: true });
@@ -2402,7 +3026,7 @@ const App = (() => {
       });
     }
 
-    if (spotifyReviewList) {
+    if (SPOTIFY_IMPORT_ENABLED && spotifyReviewList) {
       spotifyReviewList.addEventListener('click', (e) => {
         const button = e.target.closest('.spotify-row-action');
         if (!button) return;
@@ -2421,7 +3045,7 @@ const App = (() => {
       });
     }
 
-    if (spotifyImportModal) {
+    if (SPOTIFY_IMPORT_ENABLED && spotifyImportModal) {
       spotifyImportModal.addEventListener('click', (e) => {
         if (e.target === spotifyImportModal) {
           closeSpotifyImportSheet();
@@ -2429,17 +3053,17 @@ const App = (() => {
       });
     }
 
-    if (spotifyCorrectionCloseBtn) {
+    if (SPOTIFY_IMPORT_ENABLED && spotifyCorrectionCloseBtn) {
       spotifyCorrectionCloseBtn.addEventListener('click', closeSpotifyCorrectionSheet);
     }
 
-    if (spotifyCorrectionSearchBtn) {
+    if (SPOTIFY_IMPORT_ENABLED && spotifyCorrectionSearchBtn) {
       spotifyCorrectionSearchBtn.addEventListener('click', () => {
         runSpotifyCorrectionSearch(spotifyCorrectionSearchInput?.value || '');
       });
     }
 
-    if (spotifyCorrectionSearchInput) {
+    if (SPOTIFY_IMPORT_ENABLED && spotifyCorrectionSearchInput) {
       spotifyCorrectionSearchInput.addEventListener('input', () => {
         spotifyCorrectionQuery = spotifyCorrectionSearchInput.value;
       });
@@ -2452,7 +3076,7 @@ const App = (() => {
       });
     }
 
-    if (spotifyCorrectionModal) {
+    if (SPOTIFY_IMPORT_ENABLED && spotifyCorrectionModal) {
       spotifyCorrectionModal.addEventListener('click', (e) => {
         if (e.target === spotifyCorrectionModal) {
           closeSpotifyCorrectionSheet();
@@ -2549,6 +3173,24 @@ const App = (() => {
         Notifications.info('Only the controller can control playback');
         return;
       }
+
+      if (!isLocalPlaybackEnabled()) {
+        if (roomPlaybackState === 'playing') {
+          const currentTime = getExpectedRoomTime();
+          updateRoomPlaybackContext('PAUSE', { currentTime });
+          SyncClient.updatePlayButton('paused');
+          renderPlaybackSurface();
+          send({ type: 'PAUSE' });
+        } else {
+          const currentTime = getExpectedRoomTime();
+          updateRoomPlaybackContext('RESUME', { currentTime, delay: 0 });
+          SyncClient.updatePlayButton('playing');
+          renderPlaybackSurface();
+          send({ type: 'RESUME', currentTime });
+        }
+        return;
+      }
+
       const state = Player.getState();
       if (state === playingState) {
         Player.pauseVideo();

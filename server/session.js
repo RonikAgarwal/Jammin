@@ -2,6 +2,7 @@
 
 const sessions = new Map();
 const MAX_CHAT_MESSAGES = 100;
+const RECONNECT_GRACE_MS = 90 * 1000;
 
 function generateCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -12,6 +13,10 @@ function generateCode() {
   return code;
 }
 
+function sanitizePlaybackMode(playbackMode) {
+  return playbackMode === 'viewer' ? 'viewer' : 'player';
+}
+
 function createSession(ws, username) {
   let code;
   do {
@@ -19,7 +24,7 @@ function createSession(ws, username) {
   } while (sessions.has(code));
 
   const userId = generateUserId();
-  const participant = createParticipant(ws, userId, username, true);
+  const participant = createParticipant(ws, userId, username, true, 'player');
 
   const session = {
     code,
@@ -38,54 +43,146 @@ function createSession(ws, username) {
   };
 
   sessions.set(code, session);
-  ws._jammin = { sessionCode: code, userId, username };
+  ws._jammin = {
+    sessionCode: code,
+    userId,
+    username,
+    playbackMode: 'player',
+    reconnectToken: participant.reconnectToken,
+  };
 
-  return { code, userId, session };
+  return { code, userId, session, reconnectToken: participant.reconnectToken };
 }
 
-function joinSession(code, ws, username) {
+function joinSession(code, ws, username, playbackMode = 'player', reconnectToken = '') {
   const session = sessions.get(code);
   if (!session) return { error: 'Session not found' };
 
+  const requestedReconnectToken = String(reconnectToken || '').trim();
+  if (requestedReconnectToken) {
+    const existingParticipant = [...session.participants.values()].find(
+      (participant) => participant.reconnectToken === requestedReconnectToken
+    );
+
+    if (existingParticipant) {
+      if (existingParticipant.disconnectTimer) {
+        clearTimeout(existingParticipant.disconnectTimer);
+        existingParticipant.disconnectTimer = null;
+      }
+
+      existingParticipant.ws = ws;
+      existingParticipant.username = username || existingParticipant.username;
+      existingParticipant.playbackMode = sanitizePlaybackMode(playbackMode || existingParticipant.playbackMode);
+      existingParticipant.connected = true;
+      existingParticipant.disconnectedAt = null;
+      existingParticipant.status = existingParticipant.status === 'away' ? 'in-sync' : existingParticipant.status;
+
+      ws._jammin = {
+        sessionCode: code,
+        userId: existingParticipant.userId,
+        username: existingParticipant.username,
+        playbackMode: existingParticipant.playbackMode,
+        reconnectToken: existingParticipant.reconnectToken,
+      };
+
+      return {
+        userId: existingParticipant.userId,
+        session,
+        reconnectToken: existingParticipant.reconnectToken,
+        rejoined: true,
+      };
+    }
+  }
+
   const userId = generateUserId();
-  const participant = createParticipant(ws, userId, username, false);
+  const participant = createParticipant(ws, userId, username, false, sanitizePlaybackMode(playbackMode));
   session.participants.set(userId, participant);
 
-  ws._jammin = { sessionCode: code, userId, username };
+  ws._jammin = {
+    sessionCode: code,
+    userId,
+    username,
+    playbackMode: participant.playbackMode,
+    reconnectToken: participant.reconnectToken,
+  };
 
-  return { userId, session };
+  return { userId, session, reconnectToken: participant.reconnectToken, rejoined: false };
 }
 
-function leaveSession(ws) {
+function leaveSession(ws, onExpire = null) {
   if (!ws._jammin) return null;
 
   const { sessionCode, userId } = ws._jammin;
   const session = sessions.get(sessionCode);
   if (!session) return null;
   const leavingParticipant = session.participants.get(userId);
-  const leavingUsername = leavingParticipant ? leavingParticipant.username : null;
+  if (!leavingParticipant) return null;
+
+  leavingParticipant.ws = null;
+  leavingParticipant.connected = false;
+  leavingParticipant.disconnectedAt = Date.now();
+  leavingParticipant.status = 'away';
+
+  if (leavingParticipant.disconnectTimer) {
+    clearTimeout(leavingParticipant.disconnectTimer);
+  }
+
+  leavingParticipant.disconnectTimer = setTimeout(() => {
+    finalizeParticipantLeave(sessionCode, userId, onExpire);
+  }, RECONNECT_GRACE_MS);
+
+  return {
+    destroyed: false,
+    deferred: true,
+    session,
+    sessionCode,
+    leftUserId: userId,
+  };
+}
+
+function finalizeParticipantLeave(sessionCode, userId, onExpire = null) {
+  const session = sessions.get(sessionCode);
+  if (!session) return null;
+
+  const leavingParticipant = session.participants.get(userId);
+  if (!leavingParticipant || leavingParticipant.connected) return null;
+  const leavingUsername = leavingParticipant.username;
+
+  if (leavingParticipant.disconnectTimer) {
+    clearTimeout(leavingParticipant.disconnectTimer);
+    leavingParticipant.disconnectTimer = null;
+  }
 
   session.participants.delete(userId);
   session.readyUsers.delete(userId);
 
-  // Transfer host if host left
   let controlTransfer = null;
   if (session.host === userId && session.participants.size > 0) {
-    const nextHost = session.participants.keys().next().value;
-    controlTransfer = transferHost(session, nextHost, userId);
-    if (controlTransfer) {
-      controlTransfer.fromUsername = leavingUsername || 'Someone';
+    const nextHostParticipant = [...session.participants.entries()].find(([, participant]) => participant.connected)
+      || [...session.participants.entries()][0];
+    const nextHost = nextHostParticipant ? nextHostParticipant[0] : null;
+    if (nextHost) {
+      controlTransfer = transferHost(session, nextHost, userId);
+      if (controlTransfer) {
+        controlTransfer.fromUsername = leavingUsername || 'Someone';
+      }
     }
   }
 
-  // Destroy session if empty
+  let result;
   if (session.participants.size === 0) {
     if (session.preloadTimeout) clearTimeout(session.preloadTimeout);
     sessions.delete(sessionCode);
-    return { destroyed: true, sessionCode };
+    result = { destroyed: true, sessionCode, leftUserId: userId };
+  } else {
+    result = { destroyed: false, session, sessionCode, leftUserId: userId, controlTransfer };
   }
 
-  return { destroyed: false, session, sessionCode, leftUserId: userId, controlTransfer };
+  if (typeof onExpire === 'function') {
+    onExpire(result);
+  }
+
+  return result;
 }
 
 function getSession(code) {
@@ -108,7 +205,7 @@ function getCurrentReferenceTime(session) {
 function broadcast(session, message, excludeUserId = null) {
   const data = JSON.stringify(message);
   session.participants.forEach((participant, id) => {
-    if (id !== excludeUserId && participant.ws.readyState === 1) {
+    if (id !== excludeUserId && participant.connected !== false && participant.ws && participant.ws.readyState === 1) {
       participant.ws.send(data);
     }
   });
@@ -116,7 +213,7 @@ function broadcast(session, message, excludeUserId = null) {
 
 function sendTo(session, userId, message) {
   const participant = session.participants.get(userId);
-  if (participant && participant.ws.readyState === 1) {
+  if (participant && participant.connected !== false && participant.ws && participant.ws.readyState === 1) {
     participant.ws.send(JSON.stringify(message));
   }
 }
@@ -128,7 +225,9 @@ function getParticipantList(session) {
       userId: id,
       username: p.username,
       isHost: p.isHost,
+      playbackMode: p.playbackMode || 'player',
       status: p.status,
+      connected: p.connected !== false,
     });
   });
   return list;
@@ -184,12 +283,17 @@ function createMessageId() {
   return 'm_' + Math.random().toString(36).substring(2, 10);
 }
 
-function createParticipant(ws, userId, username, isHost) {
+function createParticipant(ws, userId, username, isHost, playbackMode = 'player') {
   return {
     ws,
     userId,
     username,
     isHost,
+    playbackMode: sanitizePlaybackMode(playbackMode),
+    reconnectToken: generateReconnectToken(),
+    connected: true,
+    disconnectedAt: null,
+    disconnectTimer: null,
     status: 'in-sync', // in-sync | behind | away | unstable
     lastReportedTime: 0,
     lagHistory: [],
@@ -197,10 +301,15 @@ function createParticipant(ws, userId, username, isHost) {
   };
 }
 
+function generateReconnectToken() {
+  return `r_${Math.random().toString(36).slice(2, 12)}${Math.random().toString(36).slice(2, 12)}`;
+}
+
 module.exports = {
   createSession,
   joinSession,
   leaveSession,
+  finalizeParticipantLeave,
   getSession,
   getSessionByWs,
   getCurrentReferenceTime,

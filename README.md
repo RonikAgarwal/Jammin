@@ -28,6 +28,13 @@ Create a `.env` with:
 - `YOUTUBE_API_KEY`
 - `SPOTIFY_CLIENT_ID`
 - `SPOTIFY_CLIENT_SECRET`
+- `SPOTIFY_REDIRECT_URI`
+
+For Spotify playlist import:
+- create a Spotify app in the developer dashboard
+- add the same callback URL from `SPOTIFY_REDIRECT_URI` to your Spotify app Redirect URIs
+- use `http://127.0.0.1:3000/api/spotify/callback` for local development
+- Spotify does not accept `localhost` here; use the loopback IP exactly
 
 Idea
 Just wanted something where:

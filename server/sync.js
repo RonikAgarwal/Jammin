@@ -36,6 +36,9 @@ function startPlayback(session, videoItem, startTime = 0) {
     type: 'PLAY',
     videoId: videoItem.videoId,
     title: videoItem.title,
+    artist: videoItem.artist,
+    thumbnail: videoItem.thumbnail,
+    duration: videoItem.duration,
     startTime,
   });
 

@@ -83,7 +83,7 @@ const Participants = (() => {
       const initial = (p.username || '?').charAt(0).toUpperCase();
       const colorIndex = index % AVATAR_COLORS.length;
 
-      const statusText = getStatusText(p.status);
+      const statusText = getStatusText(p.status, p.playbackMode);
 
       item.innerHTML = `
         <div class="participant-avatar" style="background: ${AVATAR_COLORS[colorIndex]}">
@@ -175,13 +175,14 @@ const Participants = (() => {
     triggerBtnEl.setAttribute('aria-expanded', 'false');
   }
 
-  function getStatusText(status) {
+  function getStatusText(status, playbackMode = 'player') {
+    const modeLabel = playbackMode === 'viewer' ? 'Host speaker' : 'On this device';
     switch (status) {
-      case 'in-sync': return 'In sync';
-      case 'behind': return 'Slightly behind';
-      case 'away': return 'Temporarily away';
-      case 'unstable': return 'Connection unstable';
-      default: return 'In sync';
+      case 'in-sync': return modeLabel;
+      case 'behind': return `${modeLabel} · Slightly behind`;
+      case 'away': return `${modeLabel} · Temporarily away`;
+      case 'unstable': return `${modeLabel} · Connection unstable`;
+      default: return modeLabel;
     }
   }
 

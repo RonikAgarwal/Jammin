@@ -51,6 +51,36 @@
     </div>
   </div>
 
+  <div class="join-mode-modal hidden" id="join-mode-modal">
+    <div class="join-mode-card glass-panel" role="dialog" aria-modal="true" aria-labelledby="join-mode-title">
+      <div class="join-mode-kicker">Join Session</div>
+      <h3 class="join-mode-title" id="join-mode-title">How do you want to join this room?</h3>
+      <p class="join-mode-copy">
+        Choose whether you are listening on the shared speaker in the room or want Jammin to play locally on this device.
+      </p>
+      <div class="join-mode-options" id="join-mode-options">
+        <button class="join-mode-option active" type="button" data-mode="viewer" aria-pressed="true">
+          <span class="join-mode-option-icon" aria-hidden="true"></span>
+          <span class="join-mode-option-copy">
+            <span class="join-mode-option-title">Play on host speaker</span>
+            <span class="join-mode-option-body">Best for in-person listening. Jammin stays synced visually without loading local audio.</span>
+          </span>
+        </button>
+        <button class="join-mode-option" type="button" data-mode="player" aria-pressed="false">
+          <span class="join-mode-option-icon" aria-hidden="true"></span>
+          <span class="join-mode-option-copy">
+            <span class="join-mode-option-title">Play on your device</span>
+            <span class="join-mode-option-body">Load the YouTube player locally and stay in sync with the room on this device.</span>
+          </span>
+        </button>
+      </div>
+      <div class="join-mode-actions">
+        <button class="btn btn-ghost" id="join-mode-cancel" type="button">Not now</button>
+        <button class="btn btn-accent" id="join-mode-confirm" type="button">Join session</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Session View -->
   <div id="session-view" class="view">
     <!-- Header -->
@@ -105,9 +135,18 @@
             <button id="player-unlock-btn" class="player-unlock-btn hidden" type="button">Join on this device</button>
             <div id="player-placeholder" class="player-placeholder">
               <div class="placeholder-content">
-                <span class="placeholder-icon" aria-hidden="true"><span></span><span></span><span></span></span>
-                <p id="player-placeholder-title">Pick a track to begin</p>
-                <p id="player-placeholder-copy" class="placeholder-copy hidden"></p>
+                <div class="placeholder-default" id="player-placeholder-default">
+                  <span class="placeholder-icon" aria-hidden="true"><span></span><span></span><span></span></span>
+                  <p id="player-placeholder-title">Pick a track to begin</p>
+                  <p id="player-placeholder-copy" class="placeholder-copy hidden"></p>
+                </div>
+                <div class="viewer-mode-card hidden" id="viewer-mode-card">
+                  <img class="viewer-mode-thumb" id="viewer-mode-thumb" alt="Current track artwork">
+                  <div class="viewer-mode-track-copy">
+                    <div class="viewer-mode-track-title" id="viewer-mode-title">Nothing playing</div>
+                    <div class="viewer-mode-track-meta" id="viewer-mode-meta">Waiting for the room to pick the next track.</div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -175,11 +214,12 @@
             </span>
             <div class="spotify-import-brand-copy">
               <div class="spotify-import-label">Spotify Playlist</div>
-              <div class="spotify-import-status" id="spotify-import-status">Paste a public Spotify playlist link to map it into YouTube matches.</div>
+              <div class="spotify-import-status" id="spotify-import-status">Connect Spotify to review playlists from your account.</div>
             </div>
           </div>
           <div class="spotify-import-shell">
             <input type="url" id="spotify-playlist-input" placeholder="Paste a Spotify playlist link..." autocomplete="off">
+            <button id="spotify-auth-btn" class="btn btn-ghost spotify-auth-btn" type="button">Connect</button>
             <button id="spotify-review-btn" class="btn btn-spotify" type="button">Review Playlist</button>
           </div>
         </div>

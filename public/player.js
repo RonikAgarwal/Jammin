@@ -3,6 +3,8 @@
 const Player = (() => {
   let player = null;
   let isReady = false;
+  let apiLoaded = false;
+  let playbackMode = 'disabled';
   let timeReportInterval = null;
   let onReadyCallback = null;
   let onEndedCallback = null;
@@ -43,16 +45,24 @@ const Player = (() => {
 
     // YouTube API ready callback
     window.onYouTubeIframeAPIReady = () => {
-      createPlayer();
+      apiLoaded = true;
+      if (playbackMode === 'player') {
+        createPlayer();
+      }
     };
 
     // If API already loaded
     if (window.YT && window.YT.Player) {
-      createPlayer();
+      apiLoaded = true;
+      if (playbackMode === 'player') {
+        createPlayer();
+      }
     }
   }
 
   function createPlayer() {
+    if (playbackMode !== 'player') return;
+    if (player) return;
     const mount = ensurePlayerMount();
     if (!mount) return;
 
@@ -91,6 +101,7 @@ const Player = (() => {
   }
 
   function runWhenReady(action) {
+    if (playbackMode !== 'player') return false;
     if (!player || !isReady) {
       pendingAction = action;
       return false;
@@ -282,9 +293,33 @@ const Player = (() => {
       staleMount.remove();
     }
 
-    if (window.YT && window.YT.Player) {
+    if (playbackMode === 'player' && window.YT && window.YT.Player) {
       createPlayer();
     }
+  }
+
+  function setPlaybackMode(mode = 'player') {
+    const nextMode = mode === 'viewer' ? 'viewer' : mode === 'player' ? 'player' : 'disabled';
+    if (playbackMode === nextMode) return;
+
+    playbackMode = nextMode;
+
+    if (playbackMode !== 'player') {
+      stopTimeReporting();
+      pendingAction = null;
+      currentVideoId = null;
+      resetPlayerSurface();
+      return;
+    }
+
+    if (apiLoaded || (window.YT && window.YT.Player)) {
+      apiLoaded = true;
+      createPlayer();
+    }
+  }
+
+  function isLocalPlaybackEnabled() {
+    return playbackMode === 'player';
   }
 
   function hidePlaceholder() {
@@ -334,5 +369,7 @@ const Player = (() => {
     resetPlayerSurface,
     showPlaceholder,
     hidePlaceholder,
+    setPlaybackMode,
+    isLocalPlaybackEnabled,
   };
 })();
