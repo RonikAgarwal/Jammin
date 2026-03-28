@@ -1977,6 +1977,8 @@ function handleMessage(ws, msg) {
       return handleRemovePlaylistGroupMsg(ws, msg);
     case 'PLAY_SELECTED':
       return handlePlaySelected(ws, msg);
+    case 'PLAY_VIDEO_NOW':
+      return handlePlayVideoNow(ws, msg);
     case 'PLAY_PLAYLIST_GROUP':
       return handlePlayPlaylistGroupMsg(ws, msg);
     case 'REQUEUE_HISTORY_ITEM':
@@ -2110,7 +2112,6 @@ async function handleAddToQueue(ws, msg) {
 async function handlePlayNext(ws, msg) {
   const session = getSessionByWs(ws);
   if (!session) return send(ws, { type: 'ERROR', message: 'Not in a session' });
-  if (session.host !== ws._jammin.userId) return send(ws, { type: 'ERROR', message: 'Only the controller can play next' });
 
   const videoId = parseYouTubeUrl(msg.videoUrl || '');
   if (!videoId) return send(ws, { type: 'ERROR', message: 'Invalid YouTube URL' });
@@ -2162,7 +2163,6 @@ async function handleAddPlaylistToQueue(ws, msg) {
 async function handlePlayNextPlaylistMsg(ws, msg) {
   const session = getSessionByWs(ws);
   if (!session) return send(ws, { type: 'ERROR', message: 'Not in a session' });
-  if (session.host !== ws._jammin.userId) return send(ws, { type: 'ERROR', message: 'Only the controller can play next' });
 
   const playlistId = String(msg.playlistId || '').trim() || parseYouTubePlaylistUrl(msg.playlistUrl || '');
   if (!playlistId) return send(ws, { type: 'ERROR', message: 'Invalid YouTube playlist link' });
@@ -2217,19 +2217,19 @@ function handleReplaceQueueWithMappedPlaylist(ws, msg) {
 
 function handleReorderQueue(ws, msg) {
   const session = getSessionByWs(ws);
-  if (!session || !ws._jammin || session.host !== ws._jammin.userId) return;
+  if (!session || !ws._jammin) return;
   reorderQueue(session, msg.fromIndex, msg.toIndex);
 }
 
 function handleRemoveFromQueue(ws, msg) {
   const session = getSessionByWs(ws);
-  if (!session || !ws._jammin || session.host !== ws._jammin.userId) return;
+  if (!session || !ws._jammin) return;
   removeFromQueue(session, msg.itemId);
 }
 
 function handleRemovePlaylistGroupMsg(ws, msg) {
   const session = getSessionByWs(ws);
-  if (!session || !ws._jammin || session.host !== ws._jammin.userId) return;
+  if (!session || !ws._jammin) return;
   removePlaylistGroup(session, msg.playlistGroupId);
 }
 
@@ -2241,6 +2241,33 @@ function handlePlaySelected(ws, msg) {
   if (item) {
     startPlayback(session, item);
   }
+}
+
+async function handlePlayVideoNow(ws, msg) {
+  const session = getSessionByWs(ws);
+  if (!session || !ws._jammin) return send(ws, { type: 'ERROR', message: 'Not in a session' });
+  if (session.host !== ws._jammin.userId) return send(ws, { type: 'ERROR', message: 'Only the controller can play that track now' });
+
+  const videoId = parseYouTubeUrl(msg.videoUrl || '');
+  if (!videoId) return send(ws, { type: 'ERROR', message: 'Invalid YouTube URL' });
+
+  const details = await fetchVideoDetails(videoId);
+  if (!details.allowed) {
+    return send(ws, {
+      type: 'ERROR',
+      message: details.reason || 'This video cannot be played inside the embedded player',
+    });
+  }
+
+  startPlayback(session, {
+    id: `search_${Math.random().toString(36).slice(2, 9)}`,
+    videoId,
+    title: details.title,
+    artist: details.artist,
+    duration: details.duration,
+    thumbnail: `https://img.youtube.com/vi/${videoId}/mqdefault.jpg`,
+    addedBy: ws._jammin.username,
+  });
 }
 
 function handlePlayPlaylistGroupMsg(ws, msg) {
@@ -2255,7 +2282,7 @@ function handlePlayPlaylistGroupMsg(ws, msg) {
 
 function handleRequeueHistoryItem(ws, msg) {
   const session = getSessionByWs(ws);
-  if (!session || !ws._jammin || session.host !== ws._jammin.userId) return;
+  if (!session || !ws._jammin) return;
   requeueHistoryItem(session, msg.itemId, msg.toIndex);
 }
 

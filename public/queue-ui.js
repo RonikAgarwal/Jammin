@@ -170,17 +170,18 @@ const QueueUI = (() => {
     el.dataset.dropType = 'current';
 
     const isHost = window.App && window.App.getIsHost();
+    const canManageQueue = window.App && window.App.canManageQueue && window.App.canManageQueue();
 
     el.innerHTML = `
       <div class="queue-row-marker queue-row-marker-played">${historyIcon()}</div>
-      <button class="queue-drag-handle" title="Drag to queue next" ${isHost ? '' : 'disabled'}>${dragHandle()}</button>
+      <button class="queue-drag-handle" title="Drag to queue next" ${canManageQueue ? '' : 'disabled'}>${dragHandle()}</button>
       ${createThumbnailHtml(item, 'queue-row-thumb')}
       <div class="queue-row-content">
         <div class="queue-row-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</div>
         <div class="queue-row-meta">${escapeHtml(formatMeta(item))}</div>
       </div>
       <span class="queue-status-muted">Played</span>
-      ${isHost ? createRowMenuHtml([
+      ${canManageQueue ? createRowMenuHtml([
         { action: 'requeue', label: 'Queue next' },
       ]) : ''}
     `;
@@ -188,7 +189,7 @@ const QueueUI = (() => {
     bindDraggableRow(el, {
       kind: 'history',
       itemId: item.id,
-      isHost,
+      canManageQueue,
     });
     bindRowMenu(el, {
       requeue: () => {
@@ -208,17 +209,18 @@ const QueueUI = (() => {
     el.dataset.dropIndex = String(index);
 
     const isHost = window.App && window.App.getIsHost();
+    const canManageQueue = window.App && window.App.canManageQueue && window.App.canManageQueue();
     const metaText = options.metaOverride || formatMeta(item);
 
     el.innerHTML = `
       <div class="queue-row-marker queue-row-marker-index">${index + 1}</div>
-      <button class="queue-drag-handle" title="Drag to reorder" ${isHost ? '' : 'disabled'}>${dragHandle()}</button>
+      <button class="queue-drag-handle" title="Drag to reorder" ${canManageQueue ? '' : 'disabled'}>${dragHandle()}</button>
       ${createThumbnailHtml(item, 'queue-row-thumb')}
       <div class="queue-row-content">
         <div class="queue-row-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</div>
         <div class="queue-row-meta">${escapeHtml(metaText)}</div>
       </div>
-      ${isHost ? `
+      ${canManageQueue ? `
         <div class="queue-row-actions">
           ${createRowMenuHtml([
             { action: 'play-next', label: options.hideMenuLabel ? 'Play this track next' : 'Play next' },
@@ -232,9 +234,9 @@ const QueueUI = (() => {
       kind: 'upcoming',
       itemId: item.id,
       index,
-      isHost,
+      canManageQueue,
     });
-    bindUpcomingRow(el, item, index, isHost);
+    bindUpcomingRow(el, item, index, { isHost, canManageQueue });
     return el;
   }
 
@@ -242,6 +244,7 @@ const QueueUI = (() => {
     const el = document.createElement('div');
     const firstItem = group.items[0];
     const isHost = window.App && window.App.getIsHost();
+    const canManageQueue = window.App && window.App.canManageQueue && window.App.canManageQueue();
     const isExpanded = expandedPlaylistGroups.has(group.groupId);
     const badgeLabel = firstItem.playlistSource === 'spotify' ? 'Spotify' : 'Playlist';
     const previewTitles = group.items
@@ -273,11 +276,11 @@ const QueueUI = (() => {
         <span class="queue-playlist-toggle-label">${isExpanded ? 'Hide tracks' : 'Show tracks'}</span>
         <span class="queue-playlist-toggle-chevron">${isExpanded ? '−' : '+'}</span>
       </button>
-      ${isHost ? `
+      ${canManageQueue ? `
         <div class="queue-row-actions">
           ${createRowMenuHtml([
             { action: isExpanded ? 'collapse-group' : 'expand-group', label: isExpanded ? 'Hide tracks' : 'Show tracks' },
-            { action: 'play-group-now', label: 'Play playlist now' },
+            ...(isHost ? [{ action: 'play-group-now', label: 'Play playlist now' }] : []),
             { action: 'remove-group', label: 'Remove playlist' },
           ])}
         </div>
@@ -292,13 +295,15 @@ const QueueUI = (() => {
       });
     }
 
-    if (isHost) {
+    if (canManageQueue) {
       bindRowMenu(el, {
         'expand-group': () => togglePlaylistGroup(group.groupId, true),
         'collapse-group': () => togglePlaylistGroup(group.groupId, false),
-        'play-group-now': () => {
-          if (window.App) App.send({ type: 'PLAY_PLAYLIST_GROUP', playlistGroupId: group.groupId });
-        },
+        ...(isHost ? {
+          'play-group-now': () => {
+            if (window.App) App.send({ type: 'PLAY_PLAYLIST_GROUP', playlistGroupId: group.groupId });
+          },
+        } : {}),
         'remove-group': () => {
           if (window.App) App.send({ type: 'REMOVE_PLAYLIST_GROUP', playlistGroupId: group.groupId });
         },
@@ -330,7 +335,9 @@ const QueueUI = (() => {
     return `<img class="${className}" src="${thumbUrl}" alt="" loading="lazy">`;
   }
 
-  function bindUpcomingRow(el, item, index, isHost) {
+  function bindUpcomingRow(el, item, index, permissions = {}) {
+    const isHost = Boolean(permissions.isHost);
+    const canManageQueue = Boolean(permissions.canManageQueue);
     if (isHost) {
       const directPlayTargets = el.querySelectorAll('.queue-row-thumb, .queue-row-title');
       directPlayTargets.forEach((target) => {
@@ -348,7 +355,7 @@ const QueueUI = (() => {
       });
     }
 
-    if (!isHost) return;
+    if (!canManageQueue) return;
     bindRowMenu(el, {
       'play-next': () => {
         if (!window.App) return;
@@ -367,7 +374,7 @@ const QueueUI = (() => {
   }
 
   function bindDraggableRow(el, config) {
-    if (!config.isHost) return;
+    if (!config.canManageQueue) return;
 
     const handle = el.querySelector('.queue-drag-handle');
     if (!handle) return;
@@ -650,7 +657,7 @@ const QueueUI = (() => {
 
   function createSuggestionCard(item) {
     const el = document.createElement('div');
-    const isHost = window.App && window.App.getIsHost();
+    const canManageQueue = window.App && window.App.canManageQueue && window.App.canManageQueue();
     el.className = 'queue-suggestion-card';
 
     el.innerHTML = `
@@ -662,11 +669,7 @@ const QueueUI = (() => {
       </div>
       <div class="queue-suggestion-actions">
         <button class="queue-suggestion-btn queue-suggestion-btn-primary" type="button" data-action="queue">+ Queue</button>
-        ${
-          isHost
-            ? '<button class="queue-suggestion-btn" type="button" data-action="play-next">Play Next</button>'
-            : ''
-        }
+        ${canManageQueue ? '<button class="queue-suggestion-btn" type="button" data-action="play-next">Play Next</button>' : ''}
       </div>
     `;
 

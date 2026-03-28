@@ -26,6 +26,9 @@ const App = (() => {
   let searchNextPageToken = null;
   let searchHasMore = false;
   let searchIsLoading = false;
+  let openSearchMenuEl = null;
+  let openSearchMenuCloseTimer = null;
+  let openSearchMenuFadeTimer = null;
   let selectedSearchResult = null;
   let songInputMode = 'search';
   let searchInputDraft = '';
@@ -55,6 +58,7 @@ const App = (() => {
   let roomReferenceTime = 0;
   let roomReferenceStartedAt = null;
   let playbackUnlockTimer = null;
+  let playbackUnlockDismissedVideoId = '';
   let blockedTrackRecoveryTimer = null;
   let blockedTrackRecoveryVideoId = null;
   let trackMetaAbortController = null;
@@ -66,6 +70,8 @@ const App = (() => {
   let activeThemeKey = 'default';
   const themeCache = new Map();
   const SEARCH_DEBOUNCE_MS = 725;
+  const SEARCH_MENU_CLOSE_DELAY_MS = 1500;
+  const SEARCH_MENU_FADE_MS = 180;
   const MIN_SEARCH_CHARS = 4;
   const SEARCH_CACHE_VERSION = 'music-rank-v2';
   const SPOTIFY_IMPORT_ENABLED = false;
@@ -689,6 +695,10 @@ const App = (() => {
     return document.getElementById('song-search-input');
   }
 
+  function canManageQueue() {
+    return Boolean(userId && sessionCode);
+  }
+
   function getSongInputValue() {
     return (getSongInputEl()?.value || '').trim();
   }
@@ -721,12 +731,14 @@ const App = (() => {
   }
 
   function updateSongInputModeUI() {
+    const addSongBar = document.querySelector('.add-song-bar');
     const shell = document.querySelector('.song-search-shell');
     const searchBtn = document.getElementById('song-mode-search-btn');
     const linkBtn = document.getElementById('song-mode-link-btn');
     const input = getSongInputEl();
     if (!input) return;
 
+    if (addSongBar) addSongBar.dataset.mode = songInputMode;
     if (shell) shell.dataset.mode = songInputMode;
 
     const isSearch = songInputMode === 'search';
@@ -1020,9 +1032,9 @@ const App = (() => {
   function updateSearchActionButtons() {
     const addBtn = document.getElementById('add-queue-btn');
     const playNextBtn = document.getElementById('play-next-btn');
-    const target = getSongInputTarget();
+    const target = songInputMode === 'link' ? getSongInputTarget() : null;
     if (addBtn) addBtn.disabled = !target;
-    if (playNextBtn) playNextBtn.disabled = !target || !isHost;
+    if (playNextBtn) playNextBtn.disabled = !target || !canManageQueue();
   }
 
   function refreshControllerAccess() {
@@ -1073,6 +1085,7 @@ const App = (() => {
 
   function markPlaybackUnlocked() {
     hasPlaybackUnlock = true;
+    playbackUnlockDismissedVideoId = '';
     clearPlaybackUnlockCheck();
     hidePlaybackUnlockPrompt();
   }
@@ -1462,10 +1475,14 @@ const App = (() => {
     if (!shouldOfferPlaybackUnlock()) return;
     if (roomPlaybackState !== 'playing' || !roomCurrentVideoId) return;
     if (locallyBlockedVideoIds.has(roomCurrentVideoId)) return;
+    if (!isHost && playbackUnlockDismissedVideoId === roomCurrentVideoId) return;
 
     const unlockBtn = document.getElementById('player-unlock-btn');
+    const listenModal = document.getElementById('device-listen-modal');
     const overlayEl = document.getElementById('player-overlay');
-    if (unlockBtn) {
+    if (!isHost && listenModal) {
+      listenModal.classList.remove('hidden');
+    } else if (unlockBtn) {
       unlockBtn.textContent = isHost ? 'Start playback on this device' : 'Join on this device';
       unlockBtn.classList.remove('hidden');
     }
@@ -1476,9 +1493,17 @@ const App = (() => {
 
   function hidePlaybackUnlockPrompt() {
     const unlockBtn = document.getElementById('player-unlock-btn');
+    const listenModal = document.getElementById('device-listen-modal');
     const overlayEl = document.getElementById('player-overlay');
     if (unlockBtn) unlockBtn.classList.add('hidden');
+    if (listenModal) listenModal.classList.add('hidden');
     if (overlayEl) overlayEl.classList.remove('local-unlock-available');
+  }
+
+  function dismissPlaybackUnlockPrompt() {
+    playbackUnlockDismissedVideoId = roomCurrentVideoId || '';
+    hidePlaybackUnlockPrompt();
+    clearPlaybackUnlockCheck();
   }
 
   function schedulePlaybackUnlockCheck(delayMs = 1800) {
@@ -1514,7 +1539,7 @@ const App = (() => {
     }
 
     if (shouldOfferPlaybackUnlock() && roomPlaybackState === 'playing' && roomCurrentVideoId) {
-      schedulePlaybackUnlockCheck(1200);
+      schedulePlaybackUnlockCheck(isHost ? 1200 : 900);
     }
   }
 
@@ -1533,6 +1558,7 @@ const App = (() => {
     }
 
     Notifications.success(isHost ? 'Playback started on this device' : 'Joined the room playback', 2200);
+    playbackUnlockDismissedVideoId = '';
     hidePlaybackUnlockPrompt();
     schedulePlaybackUnlockCheck(2200);
   }
@@ -1583,6 +1609,7 @@ const App = (() => {
       case 'PLAY':
         if (msg.videoId && msg.videoId !== roomCurrentVideoId) {
           lastHandledPlayerErrorKey = '';
+          playbackUnlockDismissedVideoId = '';
         }
         if (msg.videoId && blockedTrackRecoveryVideoId && msg.videoId !== blockedTrackRecoveryVideoId) {
           clearBlockedTrackRecovery();
@@ -1630,6 +1657,7 @@ const App = (() => {
         lastHandledPlayerErrorKey = '';
         clearBlockedTrackRecovery();
         clearPlaybackUnlockCheck();
+        playbackUnlockDismissedVideoId = '';
         hidePlaybackUnlockPrompt();
         break;
       default:
@@ -1660,6 +1688,7 @@ const App = (() => {
 
   function resetSearchSelection({ preserveQuery = false } = {}) {
     selectedSearchResult = null;
+    closeOpenSearchMenu({ animate: false });
     updateSearchActionButtons();
 
     const resultsEl = document.getElementById('song-search-results');
@@ -1686,6 +1715,188 @@ const App = (() => {
     syncSmartSuggestions(currentQueueState);
   }
 
+  function createSearchResultMenuHtml(options) {
+    const items = options
+      .map((option) => `
+        <button class="queue-row-menu-item" type="button" data-action="${escapeHtml(option.action)}">
+          ${escapeHtml(option.label)}
+        </button>
+      `)
+      .join('');
+
+    return `
+      <div class="queue-row-menu">
+        <button class="queue-row-menu-trigger" type="button" aria-haspopup="menu" aria-expanded="false" title="More options">
+          <span></span><span></span><span></span>
+        </button>
+        <div class="queue-row-menu-popover" role="menu">
+          ${items}
+        </div>
+      </div>
+    `;
+  }
+
+  function scheduleOpenSearchMenuClose() {
+    if (!openSearchMenuEl) return;
+    if (openSearchMenuCloseTimer || openSearchMenuFadeTimer) return;
+
+    openSearchMenuCloseTimer = setTimeout(() => {
+      openSearchMenuCloseTimer = null;
+      closeOpenSearchMenu({ animate: true });
+    }, SEARCH_MENU_CLOSE_DELAY_MS);
+  }
+
+  function cancelOpenSearchMenuClose() {
+    if (openSearchMenuCloseTimer) {
+      clearTimeout(openSearchMenuCloseTimer);
+      openSearchMenuCloseTimer = null;
+    }
+
+    if (openSearchMenuFadeTimer) {
+      clearTimeout(openSearchMenuFadeTimer);
+      openSearchMenuFadeTimer = null;
+    }
+
+    if (openSearchMenuEl) {
+      openSearchMenuEl.classList.remove('closing');
+      openSearchMenuEl.classList.add('open');
+    }
+  }
+
+  function finalizeOpenSearchMenuClose(menuEl, card, trigger) {
+    menuEl.classList.remove('open');
+    menuEl.classList.remove('closing');
+    menuEl.classList.remove('open-upward');
+    if (card) card.classList.remove('menu-open');
+    if (trigger) trigger.setAttribute('aria-expanded', 'false');
+    if (menuEl === openSearchMenuEl) {
+      openSearchMenuEl = null;
+    }
+  }
+
+  function closeOpenSearchMenu({ animate = false } = {}) {
+    if (!openSearchMenuEl) return;
+    cancelOpenSearchMenuClose();
+    const trigger = openSearchMenuEl.querySelector('.queue-row-menu-trigger');
+    const card = openSearchMenuEl.closest('.song-search-result');
+
+    if (animate) {
+      openSearchMenuEl.classList.add('closing');
+      openSearchMenuEl.classList.remove('open');
+      if (trigger) trigger.setAttribute('aria-expanded', 'false');
+
+      const menuToClose = openSearchMenuEl;
+      openSearchMenuFadeTimer = setTimeout(() => {
+        if (menuToClose === openSearchMenuEl) {
+          finalizeOpenSearchMenuClose(menuToClose, card, trigger);
+        } else {
+          menuToClose.classList.remove('closing');
+          menuToClose.classList.remove('open-upward');
+        }
+        openSearchMenuFadeTimer = null;
+      }, SEARCH_MENU_FADE_MS);
+      return;
+    }
+
+    finalizeOpenSearchMenuClose(openSearchMenuEl, card, trigger);
+  }
+
+  function positionSearchResultMenu(menuWrap) {
+    const popover = menuWrap.querySelector('.queue-row-menu-popover');
+    if (!popover) return;
+
+    menuWrap.classList.remove('open-upward');
+
+    const popoverRect = popover.getBoundingClientRect();
+    const containerRect = document.getElementById('song-search-results')?.getBoundingClientRect();
+    const lowerBoundary = containerRect ? Math.min(containerRect.bottom, window.innerHeight) : window.innerHeight;
+    const upperBoundary = containerRect ? Math.max(containerRect.top, 0) : 0;
+    const spaceBelow = lowerBoundary - popoverRect.top;
+    const spaceAbove = popoverRect.bottom - upperBoundary;
+
+    if (spaceBelow < popoverRect.height + 12 && spaceAbove > spaceBelow) {
+      menuWrap.classList.add('open-upward');
+    }
+  }
+
+  function sendSearchResultAction(type, item) {
+    if (!item?.videoId) return;
+
+    send({
+      type: type === 'PLAY_NEXT' ? 'PLAY_NEXT' : 'ADD_TO_QUEUE',
+      videoUrl: item.videoId,
+    });
+
+    Notifications.success(
+      type === 'PLAY_NEXT' ? 'Song moved to play next' : 'Song added to queue',
+      2200
+    );
+    setSearchStatus(
+      type === 'PLAY_NEXT'
+        ? 'Moved to Play Next. Keep browsing for more.'
+        : 'Added to queue. Keep browsing for more.'
+    );
+  }
+
+  function playSearchResultNow(item) {
+    if (!isHost || !item?.videoId) return;
+    send({ type: 'PLAY_VIDEO_NOW', videoUrl: item.videoId });
+    Notifications.success('Playing now', 1800);
+    setSearchStatus(`Now playing: ${item.title}`);
+  }
+
+  function bindSearchResultMenu(card, item) {
+    const menuWrap = card.querySelector('.queue-row-menu');
+    const trigger = card.querySelector('.queue-row-menu-trigger');
+    if (!menuWrap || !trigger) return;
+
+    trigger.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (openSearchMenuEl && openSearchMenuEl !== menuWrap) {
+        closeOpenSearchMenu({ animate: false });
+      }
+
+      cancelOpenSearchMenuClose();
+      const isOpen = menuWrap.classList.toggle('open');
+      card.classList.toggle('menu-open', isOpen);
+      if (isOpen) {
+        menuWrap.classList.remove('closing');
+        positionSearchResultMenu(menuWrap);
+      } else {
+        menuWrap.classList.remove('open-upward');
+      }
+      trigger.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+      openSearchMenuEl = isOpen ? menuWrap : null;
+    });
+
+    menuWrap.querySelectorAll('.queue-row-menu-item').forEach((button) => {
+      button.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const action = button.dataset.action;
+        closeOpenSearchMenu({ animate: false });
+        if (action === 'play-next') {
+          sendSearchResultAction('PLAY_NEXT', item);
+          return;
+        }
+        if (action === 'queue') {
+          sendSearchResultAction('ADD_TO_QUEUE', item);
+        }
+      });
+    });
+
+    card.addEventListener('pointerenter', () => {
+      if (openSearchMenuEl === menuWrap) {
+        cancelOpenSearchMenuClose();
+      }
+    });
+
+    card.addEventListener('pointerleave', () => {
+      if (openSearchMenuEl === menuWrap) {
+        scheduleOpenSearchMenuClose();
+      }
+    });
+  }
+
   function renderSearchResults(items, append = false) {
     const resultsEl = document.getElementById('song-search-results');
     if (!resultsEl) return;
@@ -1702,29 +1913,39 @@ const App = (() => {
     resultsEl.classList.remove('hidden');
 
     items.forEach((item) => {
-      const card = document.createElement('button');
-      card.type = 'button';
+      const card = document.createElement('div');
       card.className = 'song-search-result';
-      if (selectedSearchResult?.videoId === item.videoId) {
-        card.classList.add('selected');
-      }
+      const allowDirectPlay = isHost;
+      const allowQueueActions = canManageQueue();
+      const directPlayClass = allowDirectPlay ? ' song-search-direct-play' : '';
       card.innerHTML = `
-        <img class="song-search-thumb" src="${item.thumbnail}" alt="" loading="lazy">
+        <img class="song-search-thumb${directPlayClass}" src="${item.thumbnail}" alt="" loading="lazy">
         <div class="song-search-copy">
-          <div class="song-search-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</div>
+          <div class="song-search-title${directPlayClass}" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</div>
           <div class="song-search-meta">${escapeHtml(item.channelTitle || 'YouTube')}</div>
         </div>
+        ${allowQueueActions ? `
+          <div class="song-search-actions">
+            ${createSearchResultMenuHtml([
+              { action: 'queue', label: 'Add to queue' },
+              { action: 'play-next', label: 'Play next' },
+            ])}
+          </div>
+        ` : ''}
       `;
 
-      card.addEventListener('click', () => {
-        selectedSearchResult = item;
-        updateSearchActionButtons();
-        resultsEl.querySelectorAll('.song-search-result.selected').forEach((el) => {
-          el.classList.remove('selected');
+      if (allowDirectPlay) {
+        card.querySelectorAll('.song-search-direct-play').forEach((el) => {
+          el.addEventListener('click', (e) => {
+            e.stopPropagation();
+            playSearchResultNow(item);
+          });
         });
-        card.classList.add('selected');
-        setSearchStatus(`Selected: ${item.title}`);
-      });
+      }
+
+      if (allowQueueActions) {
+        bindSearchResultMenu(card, item);
+      }
 
       resultsEl.appendChild(card);
     });
@@ -1785,7 +2006,7 @@ const App = (() => {
       searchHasMore = Boolean(cached.nextPageToken);
       setSearchStatus(
         cached.items?.length
-          ? 'Select a result to queue it or play it next'
+          ? 'Use the menu to queue results, or tap artwork/title if you have control.'
           : 'No results found'
       );
       return;
@@ -1821,7 +2042,7 @@ const App = (() => {
       searchHasMore = Boolean(data.nextPageToken);
       setSearchStatus(
         data.items?.length
-          ? 'Select a result to queue it or play it next'
+          ? 'Use the menu to queue results, or tap artwork/title if you have control.'
           : 'No results found'
       );
     } catch (error) {
@@ -1850,8 +2071,8 @@ const App = (() => {
       );
       return;
     }
-    if (type === 'PLAY_NEXT' && !isHost) {
-      Notifications.info('Only the controller can Play Next');
+    if (type === 'PLAY_NEXT' && !canManageQueue()) {
+      Notifications.info('Join the room first to use Play Next');
       return;
     }
 
@@ -2909,6 +3130,9 @@ const App = (() => {
     const spotifyCorrectionSearchBtn = document.getElementById('spotify-correction-search-btn');
     const spotifyCorrectionSearchInput = document.getElementById('spotify-correction-search-input');
     const unlockBtn = document.getElementById('player-unlock-btn');
+    const deviceListenModal = document.getElementById('device-listen-modal');
+    const deviceListenStartBtn = document.getElementById('device-listen-start-btn');
+    const deviceListenLaterBtn = document.getElementById('device-listen-later-btn');
 
     refreshControllerAccess();
     updateSongInputModeUI();
@@ -3086,11 +3310,23 @@ const App = (() => {
 
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
+        closeOpenSearchMenu({ animate: false });
+        dismissPlaybackUnlockPrompt();
         closeTransferControls();
         closePlaylistImportSheet();
         closeSpotifyImportSheet();
         closeSpotifyCorrectionSheet();
       }
+    });
+
+    document.addEventListener('click', (e) => {
+      if (!openSearchMenuEl) return;
+      if (openSearchMenuEl.contains(e.target)) return;
+      closeOpenSearchMenu({ animate: false });
+    });
+
+    window.addEventListener('resize', () => {
+      closeOpenSearchMenu({ animate: false });
     });
 
     if (searchInput) {
@@ -3151,6 +3387,9 @@ const App = (() => {
 
     if (searchResults) {
       searchResults.addEventListener('scroll', () => {
+        if (openSearchMenuEl) {
+          closeOpenSearchMenu({ animate: false });
+        }
         if (!searchHasMore || searchIsLoading) return;
         const nearBottom =
           searchResults.scrollTop + searchResults.clientHeight >= searchResults.scrollHeight - 36;
@@ -3167,7 +3406,7 @@ const App = (() => {
       const playingState = window.YT?.PlayerState?.PLAYING ?? 1;
       if (!isHost) {
         if (shouldOfferPlaybackUnlock() && roomPlaybackState === 'playing' && roomCurrentVideoId && Player.getState() !== playingState) {
-          attemptPlaybackUnlock();
+          showPlaybackUnlockPrompt();
           return;
         }
         Notifications.info('Only the controller can control playback');
@@ -3229,6 +3468,28 @@ const App = (() => {
       unlockBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         attemptPlaybackUnlock();
+      });
+    }
+
+    if (deviceListenStartBtn) {
+      deviceListenStartBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        attemptPlaybackUnlock();
+      });
+    }
+
+    if (deviceListenLaterBtn) {
+      deviceListenLaterBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        dismissPlaybackUnlockPrompt();
+      });
+    }
+
+    if (deviceListenModal) {
+      deviceListenModal.addEventListener('click', (e) => {
+        if (e.target === deviceListenModal) {
+          dismissPlaybackUnlockPrompt();
+        }
       });
     }
   }
@@ -3328,6 +3589,7 @@ const App = (() => {
     send,
     init,
     getIsHost: () => isHost,
+    canManageQueue,
     openTransferControls,
     attemptPlaybackUnlock,
   };

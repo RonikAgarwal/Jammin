@@ -806,6 +806,67 @@ input[type="url"]::placeholder {
   display: none;
 }
 
+.device-listen-modal {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 22px;
+  background: linear-gradient(180deg, rgba(6, 10, 20, 0.14), rgba(6, 10, 20, 0.34));
+}
+
+.device-listen-modal.hidden {
+  display: none;
+}
+
+.device-listen-card {
+  width: min(100%, 430px);
+  padding: 18px 18px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at top right, rgba(34, 211, 238, 0.14), transparent 34%),
+    linear-gradient(160deg, rgba(8, 12, 22, 0.92), rgba(12, 18, 30, 0.88));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 22px 42px rgba(2, 6, 18, 0.34);
+}
+
+.device-listen-kicker {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent-cyan);
+}
+
+.device-listen-title {
+  font-size: 1.08rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.25;
+}
+
+.device-listen-copy {
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.device-listen-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.device-listen-actions .btn {
+  min-width: 140px;
+}
+
 .placeholder-content {
   text-align: center;
   color: var(--text-secondary);
@@ -1150,6 +1211,14 @@ body[data-playback-mode="viewer"] .player-controls {
   position: relative;
 }
 
+.add-song-bar[data-mode="search"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.add-song-bar[data-mode="search"] .add-song-actions {
+  display: none;
+}
+
 .spotify-import-bar {
   width: 100%;
   max-width: 880px;
@@ -1316,6 +1385,11 @@ body[data-spotify-import="off"] .spotify-correction-modal {
   gap: 8px;
 }
 
+.song-search-shell {
+  min-width: 0;
+  width: 100%;
+}
+
 #song-search-input {
   width: 100%;
   background: transparent;
@@ -1364,15 +1438,21 @@ body[data-spotify-import="off"] .spotify-correction-modal {
   border-radius: var(--radius-md);
   color: inherit;
   text-align: left;
-  cursor: pointer;
+  position: relative;
+  cursor: default;
   transition: all var(--transition-fast);
 }
 
 .song-search-result:hover,
-.song-search-result.selected {
+.song-search-result.selected,
+.song-search-result.menu-open {
   background: rgba(255, 255, 255, 0.08);
   border-color: rgba(34, 211, 238, 0.22);
   box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.08) inset;
+}
+
+.song-search-result.menu-open {
+  z-index: 4;
 }
 
 .song-search-thumb {
@@ -1383,9 +1463,21 @@ body[data-spotify-import="off"] .spotify-correction-modal {
   flex-shrink: 0;
 }
 
+.song-search-thumb.song-search-direct-play {
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.song-search-thumb.song-search-direct-play:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 18px rgba(6, 10, 24, 0.22);
+}
+
 .song-search-copy {
   min-width: 0;
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
 
 .song-search-title {
@@ -1395,6 +1487,19 @@ body[data-spotify-import="off"] .spotify-correction-modal {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  transition: color var(--transition-fast);
+}
+
+.song-search-direct-play {
+  cursor: pointer;
+}
+
+.song-search-direct-play:hover {
+  opacity: 0.9;
+}
+
+.song-search-title.song-search-direct-play:hover {
+  color: var(--accent-cyan);
 }
 
 .song-search-meta {
@@ -1404,6 +1509,22 @@ body[data-spotify-import="off"] .spotify-correction-modal {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.song-search-actions {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+  flex-shrink: 0;
+  opacity: 0.82;
+  transition:
+    opacity var(--transition-fast),
+    transform var(--transition-fast);
+}
+
+.song-search-result:hover .song-search-actions,
+.song-search-result.menu-open .song-search-actions {
+  opacity: 1;
 }
 
 .add-song-actions {
@@ -3821,6 +3942,34 @@ body.queue-dragging-active * {
     min-width: 152px;
     padding: 10px 14px;
     font-size: 0.78rem;
+  }
+
+  .device-listen-modal {
+    padding: 14px;
+  }
+
+  .device-listen-card {
+    width: 100%;
+    padding: 16px 14px 14px;
+    border-radius: 22px;
+  }
+
+  .device-listen-title {
+    font-size: 0.96rem;
+  }
+
+  .device-listen-copy {
+    font-size: 0.76rem;
+  }
+
+  .device-listen-actions {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .device-listen-actions .btn {
+    flex: 1;
+    min-width: 0;
   }
 
   .add-song-actions {

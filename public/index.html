@@ -133,6 +133,19 @@
             <div id="youtube-player"></div>
             <div id="player-overlay" class="player-overlay"></div>
             <button id="player-unlock-btn" class="player-unlock-btn hidden" type="button">Join on this device</button>
+            <div id="device-listen-modal" class="device-listen-modal hidden" role="dialog" aria-modal="true" aria-labelledby="device-listen-title">
+              <div class="device-listen-card glass-panel">
+                <div class="device-listen-kicker">Live on this room</div>
+                <div class="device-listen-title" id="device-listen-title">Start listening on this device?</div>
+                <div class="device-listen-copy">
+                  Jammin is already playing. Your browser needs one tap here to start audio and join at the current live moment.
+                </div>
+                <div class="device-listen-actions">
+                  <button id="device-listen-later-btn" class="btn btn-ghost" type="button">Later</button>
+                  <button id="device-listen-start-btn" class="btn btn-accent" type="button">Start Listening</button>
+                </div>
+              </div>
+            </div>
             <div id="player-placeholder" class="player-placeholder">
               <div class="placeholder-content">
                 <div class="placeholder-default" id="player-placeholder-default">
