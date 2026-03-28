@@ -155,6 +155,9 @@ const Chat = (() => {
     updateUnreadBadge();
     updateLauncherSubtitle();
     queueScrollToBottom();
+    document.dispatchEvent(new CustomEvent('jammin:chat-state', {
+      detail: { open: true },
+    }));
 
     window.setTimeout(() => {
       if (inputEl) inputEl.focus();
@@ -168,6 +171,9 @@ const Chat = (() => {
     launcherEl.classList.remove('open');
     launcherEl.setAttribute('aria-expanded', 'false');
     updateLauncherSubtitle();
+    document.dispatchEvent(new CustomEvent('jammin:chat-state', {
+      detail: { open: false },
+    }));
   }
 
   function receiveMessage(rawMessage) {

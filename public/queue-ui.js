@@ -9,11 +9,6 @@ const QueueUI = (() => {
     history: [],
   };
   let expandedPlaylistGroups = new Set();
-  let suggestionsState = {
-    items: [],
-    loading: false,
-    hidden: true,
-  };
   let dragState = null;
   let openMenuEl = null;
   let openMenuCloseTimer = null;
@@ -43,17 +38,6 @@ const QueueUI = (() => {
 
     render();
     updateTransportControls();
-    closeOpenMenu();
-  }
-
-  function setSuggestions(nextState = {}) {
-    suggestionsState = {
-      items: nextState.hidden ? [] : (nextState.items || []),
-      loading: Boolean(nextState.loading),
-      hidden: Boolean(nextState.hidden),
-    };
-
-    render();
     closeOpenMenu();
   }
 
@@ -118,19 +102,6 @@ const QueueUI = (() => {
       );
     }
 
-    if (!suggestionsState.hidden && (suggestionsState.loading || suggestionsState.items.length > 0)) {
-      listEl.appendChild(createSectionTitle('Suggested Next', 'Auto picks'));
-
-      if (suggestionsState.loading && suggestionsState.items.length === 0) {
-        listEl.appendChild(
-          createHelperCard('Finding a few good next picks', 'These suggestions adjust to the current vibe.')
-        );
-      } else {
-        suggestionsState.items.forEach((item) => {
-          listEl.appendChild(createSuggestionCard(item));
-        });
-      }
-    }
   }
 
   function createSectionTitle(title, meta = '') {
@@ -655,47 +626,6 @@ const QueueUI = (() => {
     return el;
   }
 
-  function createSuggestionCard(item) {
-    const el = document.createElement('div');
-    const canManageQueue = window.App && window.App.canManageQueue && window.App.canManageQueue();
-    el.className = 'queue-suggestion-card';
-
-    el.innerHTML = `
-      ${createThumbnailHtml(item, 'queue-suggestion-thumb')}
-      <div class="queue-suggestion-copy">
-        <div class="queue-suggestion-kicker">Suggested for this room</div>
-        <div class="queue-suggestion-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</div>
-        <div class="queue-suggestion-meta">${escapeHtml(item.channelTitle || item.artist || 'YouTube')}</div>
-      </div>
-      <div class="queue-suggestion-actions">
-        <button class="queue-suggestion-btn queue-suggestion-btn-primary" type="button" data-action="queue">+ Queue</button>
-        ${canManageQueue ? '<button class="queue-suggestion-btn" type="button" data-action="play-next">Play Next</button>' : ''}
-      </div>
-    `;
-
-    el.querySelectorAll('.queue-suggestion-btn').forEach((button) => {
-      button.addEventListener('click', () => {
-        if (!window.App) return;
-
-        const action = button.dataset.action;
-        if (action === 'play-next') {
-          App.send({ type: 'PLAY_NEXT', videoUrl: item.videoId });
-          if (window.Notifications?.success) {
-            Notifications.success('Suggestion moved to play next', 1800);
-          }
-          return;
-        }
-
-        App.send({ type: 'ADD_TO_QUEUE', videoUrl: item.videoId });
-        if (window.Notifications?.success) {
-          Notifications.success('Suggestion added to queue', 1800);
-        }
-      });
-    });
-
-    return el;
-  }
-
   function updateTransportControls() {
     const prevBtn = document.getElementById('prev-btn');
     const nextBtn = document.getElementById('next-btn');
@@ -807,5 +737,5 @@ const QueueUI = (() => {
     return div.innerHTML;
   }
 
-  return { init, update, setSuggestions, refreshPermissions };
+  return { init, update, refreshPermissions };
 })();

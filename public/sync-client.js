@@ -153,14 +153,22 @@ const SyncClient = (() => {
     const btn = document.getElementById('play-pause-btn');
     const indicator = document.querySelector('.playing-indicator');
     if (!btn) return;
+    const playIcon = btn.querySelector('.control-icon-play');
+    const pauseIcon = btn.querySelector('.control-icon-pause');
 
     if (state === 'playing') {
-      btn.textContent = '⏸';
+      btn.dataset.state = 'playing';
+      btn.setAttribute('aria-label', 'Pause');
       btn.classList.add('playing');
+      playIcon?.classList.add('hidden');
+      pauseIcon?.classList.remove('hidden');
       if (indicator) indicator.classList.remove('paused');
     } else {
-      btn.textContent = '▶';
+      btn.dataset.state = 'paused';
+      btn.setAttribute('aria-label', 'Play');
       btn.classList.remove('playing');
+      playIcon?.classList.remove('hidden');
+      pauseIcon?.classList.add('hidden');
       if (indicator) indicator.classList.add('paused');
     }
   }

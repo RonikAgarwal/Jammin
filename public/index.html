@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="description" content="Jammin lets friends listen to YouTube together in real time with shared playback, queueing, and room chat.">
   <meta name="referrer" content="origin">
   <title>Jammin — Listen Together</title>
@@ -182,11 +182,48 @@
               <input type="range" id="seek-bar" class="custom-seek-bar" min="0" max="100" value="0" step="0.1" disabled>
               <span id="seek-total">0:00</span>
             </div>
-            <button class="control-btn" id="prev-btn" title="Previous" disabled>⏮</button>
-            <button class="control-btn control-play" id="play-pause-btn" title="Play/Pause">▶</button>
-            <button class="control-btn" id="next-btn" title="Skip">⏭</button>
+            <button class="control-btn" id="prev-btn" title="Previous" aria-label="Previous" disabled>
+              <span class="control-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none">
+                  <path d="M7 6v12" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path>
+                  <path d="M17 7 10 12l7 5V7Z" fill="currentColor"></path>
+                </svg>
+              </span>
+            </button>
+            <button class="control-btn control-play" id="play-pause-btn" title="Play/Pause" aria-label="Play" data-state="paused">
+              <span class="control-icon control-icon-play" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none">
+                  <path d="M9 7.2 17.2 12 9 16.8V7.2Z" fill="currentColor"></path>
+                </svg>
+              </span>
+              <span class="control-icon control-icon-pause hidden" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none">
+                  <path d="M9 7.5v9" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"></path>
+                  <path d="M15 7.5v9" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"></path>
+                </svg>
+              </span>
+            </button>
+            <button class="control-btn" id="next-btn" title="Skip" aria-label="Skip" disabled>
+              <span class="control-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none">
+                  <path d="M17 6v12" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path>
+                  <path d="M7 7 14 12l-7 5V7Z" fill="currentColor"></path>
+                </svg>
+              </span>
+            </button>
           </div>
         </div>
+
+        <button class="mobile-upnext-card glass-panel hidden" id="mobile-upnext-card" type="button" aria-label="Open queue">
+          <span class="mobile-upnext-kicker">Up next</span>
+          <span class="mobile-upnext-body">
+            <img class="mobile-upnext-thumb" id="mobile-upnext-thumb" alt="">
+            <span class="mobile-upnext-copy">
+              <span class="mobile-upnext-title" id="mobile-upnext-title">Nothing queued yet</span>
+              <span class="mobile-upnext-meta" id="mobile-upnext-meta">Queue stays tucked away until you need it.</span>
+            </span>
+          </span>
+        </button>
 
         <!-- Add Song Bar -->
         <div class="add-song-bar glass-panel">
@@ -257,6 +294,7 @@
       </aside>
     </main>
 
+    <div class="mobile-surface-backdrop hidden" id="mobile-surface-backdrop"></div>
     <div class="participants-backdrop hidden" id="participants-backdrop"></div>
     <aside class="participants-sheet glass-panel hidden" id="participants-sheet" aria-label="Room participants">
       <div class="participants-sheet-handle"></div>
@@ -334,6 +372,39 @@
         </div>
       </form>
     </aside>
+
+    <nav class="mobile-bottom-dock glass-panel hidden" id="mobile-bottom-dock" aria-label="Mobile actions">
+      <button class="mobile-dock-btn" id="mobile-chat-btn" type="button" aria-label="Open chat">
+        <span class="mobile-dock-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M7 18.5c-2.8 0-5-1.9-5-4.5s2.2-4.5 5-4.5h10c2.8 0 5 1.9 5 4.5s-2.2 4.5-5 4.5H11l-4.5 3z"></path>
+            <path d="M8 13.5h.01"></path>
+            <path d="M12 13.5h.01"></path>
+            <path d="M16 13.5h.01"></path>
+          </svg>
+        </span>
+        <span class="mobile-dock-label">Chat</span>
+      </button>
+      <button class="mobile-dock-btn mobile-dock-btn-primary" id="mobile-search-btn" type="button" aria-label="Open search">
+        <span class="mobile-dock-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="6"></circle>
+            <path d="m20 20-3.5-3.5"></path>
+          </svg>
+        </span>
+        <span class="mobile-dock-label">Search</span>
+      </button>
+      <button class="mobile-dock-btn" id="mobile-queue-btn" type="button" aria-label="Open queue">
+        <span class="mobile-dock-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M6 7h12"></path>
+            <path d="M6 12h12"></path>
+            <path d="M6 17h8"></path>
+          </svg>
+        </span>
+        <span class="mobile-dock-label">Queue</span>
+      </button>
+    </nav>
   </div>
 
   <div class="control-transfer-modal hidden" id="control-transfer-modal">

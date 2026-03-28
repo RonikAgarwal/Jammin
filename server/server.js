@@ -56,6 +56,12 @@ const {
 } = require('./sync');
 
 const { handleTimeReport } = require('./lag');
+const {
+  buildSearchCacheKey,
+  getSearchCache,
+  normalizeSearchQuery,
+  setSearchCache,
+} = require('./search-cache');
 
 const app = express();
 const server = http.createServer(app);
@@ -71,8 +77,6 @@ const SPOTIFY_CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET || '';
 const SPOTIFY_REDIRECT_URI = process.env.SPOTIFY_REDIRECT_URI || '';
 const CHAT_MESSAGE_LIMIT = 320;
 const CHAT_RATE_LIMIT_MS = 400;
-const YOUTUBE_SEARCH_CACHE_TTL_MS = 10 * 60 * 1000;
-const YOUTUBE_SUGGESTIONS_CACHE_TTL_MS = 15 * 60 * 1000;
 const YOUTUBE_PLAYLIST_CACHE_TTL_MS = 15 * 60 * 1000;
 const SPOTIFY_PLAYLIST_CACHE_TTL_MS = 20 * 60 * 1000;
 const SPOTIFY_MATCH_CACHE_TTL_MS = 20 * 60 * 1000;
@@ -86,8 +90,6 @@ const SPOTIFY_AUTH_STATE_TTL_MS = 10 * 60 * 1000;
 const SPOTIFY_TRANSFER_TOKEN_TTL_MS = 5 * 60 * 1000;
 const SPOTIFY_OAUTH_SCOPE = 'playlist-read-private playlist-read-collaborative';
 const SPOTIFY_SESSION_COOKIE_NAME = 'jammin_spotify_sid';
-const youtubeSearchCache = new Map();
-const youtubeSuggestionsCache = new Map();
 const youtubePlaylistPreviewCache = new Map();
 const youtubePlaylistImportCache = new Map();
 const youtubeVideoMetaCache = new Map();
@@ -440,12 +442,6 @@ function inferPreferredArtistFromSearchResults(query = '', items = []) {
   const ranked = [...weights.entries()].sort((a, b) => b[1] - a[1]);
   if (!ranked.length || ranked[0][1] < 3) return '';
   return ranked[0][0];
-}
-
-function buildSuggestionQuery(title, artist) {
-  const cleanTitle = normalizeSuggestionQuery(title);
-  const cleanArtist = normalizeSuggestionQuery(artist);
-  return [cleanArtist, cleanTitle].filter(Boolean).join(' ').trim();
 }
 
 function dedupeSearchItems(items, excludedVideoId = '') {
@@ -1411,9 +1407,9 @@ async function fetchPlaylistImport(playlistId) {
 }
 
 app.get('/api/youtube/search', async (req, res) => {
-  const query = String(req.query.q || '').trim();
+  const rawQuery = String(req.query.q || '');
   const pageToken = String(req.query.pageToken || '').trim();
-  const cacheKey = `${query.toLowerCase()}::${pageToken}`;
+  const normalizedQuery = normalizeSearchQuery(rawQuery);
 
   if (!YOUTUBE_API_KEY) {
     return res.status(503).json({
@@ -1422,17 +1418,17 @@ app.get('/api/youtube/search', async (req, res) => {
     });
   }
 
-  if (!query) {
+  if (!normalizedQuery) {
     return res.json({ items: [], nextPageToken: null });
   }
 
-  const cached = youtubeSearchCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) {
-    return res.json(cached.payload);
-  }
-
+  const cached = getSearchCache(normalizedQuery, pageToken);
   if (cached) {
-    youtubeSearchCache.delete(cacheKey);
+    console.info(`[youtube-search] cache hit: ${cached.query}`);
+    return res.json({
+      items: cached.results,
+      nextPageToken: cached.nextPageToken,
+    });
   }
 
   try {
@@ -1443,7 +1439,7 @@ app.get('/api/youtube/search', async (req, res) => {
       videoEmbeddable: 'true',
       videoSyndicated: 'true',
       maxResults: '12',
-      q: query,
+      q: normalizedQuery,
       key: YOUTUBE_API_KEY,
     });
 
@@ -1467,11 +1463,11 @@ app.get('/api/youtube/search', async (req, res) => {
     }
 
     const baseItems = formatYouTubeSearchItems(data);
-    const preferredArtist = inferPreferredArtistFromSearchResults(query, baseItems);
+    const preferredArtist = inferPreferredArtistFromSearchResults(normalizedQuery, baseItems);
     const rankedItems = baseItems
       .map((item) => ({
         item,
-        rank: scoreGenericSearchCandidate(query, item, preferredArtist),
+        rank: scoreGenericSearchCandidate(normalizedQuery, item, preferredArtist),
       }))
       .sort((a, b) => b.rank - a.rank || a.item.title.length - b.item.title.length)
       .map(({ item }) => item)
@@ -1482,10 +1478,8 @@ app.get('/api/youtube/search', async (req, res) => {
       nextPageToken: data.nextPageToken || null,
     };
 
-    youtubeSearchCache.set(cacheKey, {
-      expiresAt: Date.now() + YOUTUBE_SEARCH_CACHE_TTL_MS,
-      payload,
-    });
+    const stored = setSearchCache(normalizedQuery, pageToken, payload);
+    console.info(`[youtube-search] api fetch: ${stored?.query || buildSearchCacheKey(normalizedQuery, pageToken)}`);
 
     return res.json(payload);
   } catch (error) {
@@ -1493,76 +1487,6 @@ app.get('/api/youtube/search', async (req, res) => {
       error: 'Unable to reach YouTube search right now.',
       code: 'youtube_search_unavailable',
     });
-  }
-});
-
-app.get('/api/youtube/suggestions', async (req, res) => {
-  const videoId = String(req.query.videoId || '').trim();
-  const title = String(req.query.title || '').trim();
-  const artist = String(req.query.artist || '').trim();
-  const cacheKey = `${videoId}::${title.toLowerCase()}::${artist.toLowerCase()}`;
-
-  if (!YOUTUBE_API_KEY || (!videoId && !title && !artist)) {
-    return res.json({ items: [] });
-  }
-
-  const cached = youtubeSuggestionsCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) {
-    return res.json(cached.payload);
-  }
-
-  if (cached) {
-    youtubeSuggestionsCache.delete(cacheKey);
-  }
-
-  try {
-    const candidateItems = [];
-
-    if (videoId) {
-      const relatedParams = new URLSearchParams({
-        part: 'snippet',
-        type: 'video',
-        relatedToVideoId: videoId,
-        videoEmbeddable: 'true',
-        videoSyndicated: 'true',
-        maxResults: '8',
-        key: YOUTUBE_API_KEY,
-      });
-      const { response, data } = await requestYouTubeSearch(relatedParams);
-      if (response.ok) {
-        candidateItems.push(...formatYouTubeSearchItems(data));
-      }
-    }
-
-    const fallbackQuery = buildSuggestionQuery(title, artist);
-    if (candidateItems.length < 5 && fallbackQuery) {
-      const fallbackParams = new URLSearchParams({
-        part: 'snippet',
-        type: 'video',
-        videoEmbeddable: 'true',
-        videoSyndicated: 'true',
-        maxResults: '8',
-        q: fallbackQuery,
-        key: YOUTUBE_API_KEY,
-      });
-      const { response, data } = await requestYouTubeSearch(fallbackParams);
-      if (response.ok) {
-        candidateItems.push(...formatYouTubeSearchItems(data));
-      }
-    }
-
-    const payload = {
-      items: dedupeSearchItems(candidateItems, videoId).slice(0, 6),
-    };
-
-    youtubeSuggestionsCache.set(cacheKey, {
-      expiresAt: Date.now() + YOUTUBE_SUGGESTIONS_CACHE_TTL_MS,
-      payload,
-    });
-
-    return res.json(payload);
-  } catch {
-    return res.json({ items: [] });
   }
 });
 

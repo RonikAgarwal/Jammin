@@ -30,6 +30,11 @@ Create a `.env` with:
 - `SPOTIFY_CLIENT_SECRET`
 - `SPOTIFY_REDIRECT_URI`
 
+YouTube search caching:
+- Jammin now keeps a local SQLite cache in [data/jammin-cache.sqlite](/Users/ronikagarwal/Desktop/jammin/data/jammin-cache.sqlite)
+- normalized YouTube search queries are cached for 24 hours before hitting the API again
+- this helps cut `search.list` quota usage without changing the frontend behavior
+
 For Spotify playlist import:
 - create a Spotify app in the developer dashboard
 - add the same callback URL from `SPOTIFY_REDIRECT_URI` to your Spotify app Redirect URIs

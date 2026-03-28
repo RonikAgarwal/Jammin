@@ -68,6 +68,7 @@ const App = (() => {
   let lastHandledPlayerErrorKey = '';
   let themeRequestToken = 0;
   let activeThemeKey = 'default';
+  let activeMobileSurface = '';
   const themeCache = new Map();
   const SEARCH_DEBOUNCE_MS = 725;
   const SEARCH_MENU_CLOSE_DELAY_MS = 1500;
@@ -80,10 +81,7 @@ const App = (() => {
   const SPOTIFY_REVIEW_AFTER_AUTH_STORAGE_KEY = 'jammin_spotify_review_after_auth';
   const ACTIVE_SESSION_STORAGE_KEY = 'jammin_active_session';
   const searchCache = new Map();
-  const suggestionCache = new Map();
   const trackMetaCache = new Map();
-  const SUGGESTION_QUEUE_THRESHOLD = 2;
-  const SUGGESTION_RESULTS_LIMIT = 3;
   const DEFAULT_THEME_VARS = {
     '--bg-deep': '#0b0f17',
     '--bg-mid': '#151b29',
@@ -264,6 +262,94 @@ const App = (() => {
     searchIsLoading = loading;
     const resultsEl = document.getElementById('song-search-results');
     if (resultsEl) resultsEl.dataset.loading = loading ? 'true' : 'false';
+  }
+
+  function isMobileViewport() {
+    return window.matchMedia?.('(max-width: 900px)').matches;
+  }
+
+  function syncMobileSurfaceState() {
+    const mobile = isMobileViewport();
+    document.body.dataset.mobileSurface = mobile ? activeMobileSurface || '' : '';
+    const backdrop = document.getElementById('mobile-surface-backdrop');
+    if (backdrop) {
+      backdrop.classList.toggle('hidden', !mobile || !activeMobileSurface);
+    }
+
+    const chatBtn = document.getElementById('mobile-chat-btn');
+    const searchBtn = document.getElementById('mobile-search-btn');
+    const queueBtn = document.getElementById('mobile-queue-btn');
+    const dock = document.getElementById('mobile-bottom-dock');
+    dock?.classList.toggle('hidden', !mobile);
+    chatBtn?.classList.toggle('active', activeMobileSurface === 'chat');
+    searchBtn?.classList.toggle('active', activeMobileSurface === 'search');
+    queueBtn?.classList.toggle('active', activeMobileSurface === 'queue');
+  }
+
+  function setMobileSurface(surface = '') {
+    if (!isMobileViewport()) {
+      activeMobileSurface = '';
+      syncMobileSurfaceState();
+      return;
+    }
+
+    const nextSurface = activeMobileSurface === surface ? '' : surface;
+    activeMobileSurface = nextSurface;
+
+    if (nextSurface === 'search' || nextSurface === 'queue') {
+      if (window.Chat?.isOpen?.()) window.Chat.close();
+      if (window.Participants?.isOpen?.()) window.Participants.closePanel();
+      if (nextSurface === 'search') {
+        window.setTimeout(() => {
+          document.getElementById('song-search-input')?.focus();
+        }, 180);
+      }
+    }
+
+    if (nextSurface === 'chat') {
+      if (window.Participants?.isOpen?.()) window.Participants.closePanel();
+      if (!window.Chat?.isOpen?.()) window.Chat?.open?.();
+    } else if (activeMobileSurface !== 'chat' && window.Chat?.isOpen?.() && surface !== 'chat') {
+      window.Chat.close();
+    }
+
+    syncMobileSurfaceState();
+  }
+
+  function closeMobileSurface() {
+    if (!activeMobileSurface) return;
+    const previousSurface = activeMobileSurface;
+    activeMobileSurface = '';
+    if (previousSurface === 'chat' && window.Chat?.isOpen?.()) {
+      window.Chat.close();
+      return;
+    }
+    syncMobileSurfaceState();
+  }
+
+  function updateMobileUpNextPreview() {
+    const card = document.getElementById('mobile-upnext-card');
+    const thumb = document.getElementById('mobile-upnext-thumb');
+    const title = document.getElementById('mobile-upnext-title');
+    const meta = document.getElementById('mobile-upnext-meta');
+    if (!card || !thumb || !title || !meta) return;
+
+    if (!isMobileViewport()) {
+      card.classList.add('hidden');
+      return;
+    }
+
+    const nextItem = currentQueueState?.upcoming?.[0] || null;
+    if (!nextItem) {
+      card.classList.add('hidden');
+      return;
+    }
+
+    card.classList.remove('hidden');
+    thumb.src = nextItem.thumbnail || thumbnailForVideo(nextItem.videoId);
+    thumb.alt = nextItem.title ? `${nextItem.title} artwork` : 'Up next artwork';
+    title.textContent = nextItem.title || 'Next track';
+    meta.textContent = nextItem.artist || nextItem.channelTitle || 'Ready in the queue';
   }
 
   function setSpotifyImportStatus(message) {
@@ -826,207 +912,17 @@ const App = (() => {
     };
   }
 
-  function updateSmartSuggestions(nextState) {
-    if (typeof QueueUI !== 'undefined' && typeof QueueUI.setSuggestions === 'function') {
-      QueueUI.setSuggestions(nextState);
-    }
-  }
-
   function clearSmartSuggestions() {
     if (suggestionAbortController) {
       suggestionAbortController.abort();
       suggestionAbortController = null;
     }
-    updateSmartSuggestions({ items: [], loading: false, hidden: true });
-  }
-
-  function isSearchPanelActive() {
-    if (songInputMode !== 'search') return false;
-    const input = document.getElementById('song-search-input');
-    const resultsEl = document.getElementById('song-search-results');
-    const query = (input?.value || searchQuery || '').trim();
-    const resultsVisible = Boolean(resultsEl && !resultsEl.classList.contains('hidden') && resultsEl.children.length);
-    return query.length >= MIN_SEARCH_CHARS || resultsVisible;
-  }
-
-  function buildSuggestionSeed(queueState) {
-    const currentItem = queueState?.current;
-    if (!currentItem) return '';
-    return [
-      currentItem.videoId || '',
-      currentItem.title || '',
-      currentItem.artist || '',
-    ].join('::');
-  }
-
-  function normalizeTrackText(text) {
-    return String(text || '')
-      .toLowerCase()
-      .replace(/\[[^\]]*\]/g, ' ')
-      .replace(/\([^)]*\)/g, ' ')
-      .replace(/&amp;|&#39;|&quot;/g, ' ')
-      .replace(/\b(official|video|lyrics?|lyrical|audio|full song|visualizer|topic|music|from|feat|ft)\b/g, ' ')
-      .replace(/[^a-z0-9]+/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-  }
-
-  function buildTrackFingerprints(item) {
-    if (!item) {
-      return {
-        titleKey: '',
-        artistKey: '',
-        combinedKey: '',
-        titleWords: [],
-        prefixKey: '',
-      };
-    }
-
-    const titleKey = normalizeTrackText(item.title);
-    const artistKey = normalizeTrackText(item.artist || item.channelTitle || '');
-    const titleWords = titleKey.split(' ').filter(Boolean);
-    return {
-      titleKey,
-      artistKey,
-      combinedKey: [titleKey, artistKey].filter(Boolean).join('::'),
-      titleWords,
-      prefixKey: titleWords.slice(0, 5).join(' '),
-    };
-  }
-
-  function areTracksTooSimilar(base, candidate) {
-    if (!base?.titleKey || !candidate?.titleKey) return false;
-
-    if (base.combinedKey && base.combinedKey === candidate.combinedKey) return true;
-    if (base.titleKey === candidate.titleKey) return true;
-    if (base.prefixKey && candidate.prefixKey && base.prefixKey === candidate.prefixKey) return true;
-
-    const shorterTitle = base.titleKey.length <= candidate.titleKey.length ? base.titleKey : candidate.titleKey;
-    if (shorterTitle && shorterTitle.length >= 14) {
-      if (base.titleKey.includes(shorterTitle) || candidate.titleKey.includes(shorterTitle)) {
-        return true;
-      }
-    }
-
-    const baseWords = base.titleWords || [];
-    const candidateWords = candidate.titleWords || [];
-    const overlap = baseWords.filter((word) => candidateWords.includes(word));
-    const shorterWordCount = Math.min(baseWords.length, candidateWords.length);
-
-    if (
-      shorterWordCount >= 3 &&
-      overlap.length / shorterWordCount >= 0.68
-    ) {
-      return true;
-    }
-
-    if (base.artistKey && candidate.artistKey && base.artistKey === candidate.artistKey) {
-      if (overlap.length >= Math.min(3, shorterWordCount)) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  function filterSuggestionItems(items, queueState = currentQueueState) {
-    const takenIds = new Set();
-    const takenFingerprints = [];
-    [queueState.current, ...(queueState.upcoming || []), ...(queueState.history || [])].forEach((item) => {
-      if (item?.videoId) takenIds.add(item.videoId);
-      const fingerprints = buildTrackFingerprints(item);
-      if (fingerprints.titleKey) {
-        takenFingerprints.push(fingerprints);
-      }
-    });
-
-    const filtered = [];
-    for (const item of items || []) {
-      const videoId = String(item?.videoId || '').trim();
-      if (!videoId || takenIds.has(videoId)) continue;
-      const fingerprints = buildTrackFingerprints(item);
-      if (takenFingerprints.some((taken) => areTracksTooSimilar(taken, fingerprints))) {
-        continue;
-      }
-      takenIds.add(videoId);
-      if (fingerprints.titleKey) {
-        takenFingerprints.push(fingerprints);
-      }
-      filtered.push({
-        ...item,
-        artist: item.artist || item.channelTitle || '',
-      });
-      if (filtered.length >= SUGGESTION_RESULTS_LIMIT) break;
-    }
-    return filtered;
   }
 
   async function syncSmartSuggestions(queueState) {
     currentQueueState = normalizeQueueState(queueState);
-    const { current, upcoming } = currentQueueState;
-
-    if (!current || upcoming.length > SUGGESTION_QUEUE_THRESHOLD || isSearchPanelActive()) {
-      clearSmartSuggestions();
-      return;
-    }
-
-    const seedKey = buildSuggestionSeed(currentQueueState);
-    if (!seedKey) {
-      clearSmartSuggestions();
-      return;
-    }
-
-    if (suggestionCache.has(seedKey)) {
-      const cachedItems = filterSuggestionItems(suggestionCache.get(seedKey), currentQueueState);
-      updateSmartSuggestions({
-        items: cachedItems,
-        loading: false,
-        hidden: cachedItems.length === 0,
-      });
-      return;
-    }
-
-    if (suggestionAbortController) {
-      suggestionAbortController.abort();
-    }
-
-    updateSmartSuggestions({ items: [], loading: true, hidden: false });
-    suggestionAbortController = new AbortController();
-    const controller = suggestionAbortController;
-
-    try {
-      const params = new URLSearchParams({
-        videoId: current.videoId || '',
-        title: current.title || '',
-        artist: current.artist || '',
-      });
-      const response = await fetch(`/api/youtube/suggestions?${params.toString()}`, {
-        signal: controller.signal,
-      });
-      const data = await readApiResponse(response, 'Suggestions need a quick server refresh right now.');
-
-      if (!response.ok) {
-        throw new Error(data?.error || 'Suggestion lookup unavailable');
-      }
-
-      suggestionCache.set(seedKey, data.items || []);
-      if (suggestionAbortController !== controller) return;
-
-      const filteredItems = filterSuggestionItems(data.items, currentQueueState);
-      updateSmartSuggestions({
-        items: filteredItems,
-        loading: false,
-        hidden: filteredItems.length === 0,
-      });
-    } catch (error) {
-      if (error.name === 'AbortError') return;
-      if (suggestionAbortController !== controller) return;
-      updateSmartSuggestions({ items: [], loading: false, hidden: true });
-    } finally {
-      if (suggestionAbortController === controller) {
-        suggestionAbortController = null;
-      }
-    }
+    updateMobileUpNextPreview();
+    clearSmartSuggestions();
   }
 
   function updateSearchActionButtons() {
@@ -2808,6 +2704,7 @@ const App = (() => {
         updateRoomPlaybackContext('QUEUE_EMPTY');
         resetReactiveTheme();
         currentQueueState = { current: null, upcoming: [], history: [] };
+        updateMobileUpNextPreview();
         clearSmartSuggestions();
         Notifications.info('Queue is empty. Add more tracks to keep going.');
         showStandardPlaceholder();
@@ -3133,9 +3030,16 @@ const App = (() => {
     const deviceListenModal = document.getElementById('device-listen-modal');
     const deviceListenStartBtn = document.getElementById('device-listen-start-btn');
     const deviceListenLaterBtn = document.getElementById('device-listen-later-btn');
+    const mobileSearchBtn = document.getElementById('mobile-search-btn');
+    const mobileQueueBtn = document.getElementById('mobile-queue-btn');
+    const mobileChatBtn = document.getElementById('mobile-chat-btn');
+    const mobileSurfaceBackdrop = document.getElementById('mobile-surface-backdrop');
+    const mobileUpNextCard = document.getElementById('mobile-upnext-card');
 
     refreshControllerAccess();
     updateSongInputModeUI();
+    syncMobileSurfaceState();
+    updateMobileUpNextPreview();
     if (SPOTIFY_IMPORT_ENABLED) {
       syncSpotifyImportStatusToState();
     }
@@ -3312,6 +3216,7 @@ const App = (() => {
       if (e.key === 'Escape') {
         closeOpenSearchMenu({ animate: false });
         dismissPlaybackUnlockPrompt();
+        closeMobileSurface();
         closeTransferControls();
         closePlaylistImportSheet();
         closeSpotifyImportSheet();
@@ -3327,6 +3232,17 @@ const App = (() => {
 
     window.addEventListener('resize', () => {
       closeOpenSearchMenu({ animate: false });
+      if (!isMobileViewport()) {
+        activeMobileSurface = '';
+        syncMobileSurfaceState();
+      }
+      updateMobileUpNextPreview();
+    });
+
+    document.addEventListener('jammin:chat-state', (event) => {
+      if (!isMobileViewport()) return;
+      activeMobileSurface = event.detail?.open ? 'chat' : '';
+      syncMobileSurfaceState();
     });
 
     if (searchInput) {
@@ -3397,6 +3313,41 @@ const App = (() => {
         if (nearBottom) {
           runSongSearch(searchQuery, { append: true });
         }
+      });
+    }
+
+    if (mobileSearchBtn) {
+      mobileSearchBtn.addEventListener('click', () => {
+        setMobileSurface('search');
+      });
+    }
+
+    if (mobileQueueBtn) {
+      mobileQueueBtn.addEventListener('click', () => {
+        setMobileSurface('queue');
+      });
+    }
+
+    if (mobileChatBtn) {
+      mobileChatBtn.addEventListener('click', () => {
+        if (!isMobileViewport()) return;
+        if (window.Chat?.isOpen?.()) {
+          window.Chat.close();
+          return;
+        }
+        setMobileSurface('chat');
+      });
+    }
+
+    if (mobileSurfaceBackdrop) {
+      mobileSurfaceBackdrop.addEventListener('click', () => {
+        closeMobileSurface();
+      });
+    }
+
+    if (mobileUpNextCard) {
+      mobileUpNextCard.addEventListener('click', () => {
+        setMobileSurface('queue');
       });
     }
 
